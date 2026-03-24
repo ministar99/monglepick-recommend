@@ -1,0 +1,86 @@
+# =========================================
+# 몽글픽 추천 서비스 CI/CD 워크플로우
+# =========================================
+# PR/push → pytest 테스트 (GitHub 호스팅 러너, SQLite 인메모리)
+# develop push → 스테이징 맥북에서 직접 배포 (Self-hosted 러너)
+#
+# 사전 준비:
+#   스테이징 맥북에 GitHub Actions self-hosted runner 설치 완료
+
+name: CI/CD
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── CI: 테스트 (GitHub 호스팅 러너) ───
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio aiosqlite httpx
+
+      - name: Test
+        run: pytest tests/ -v --tb=short -q
+
+  # ─── CD: 스테이징 배포 (Self-hosted 러너에서 직접 실행) ───
+  deploy:
+    name: Deploy to Staging
+    needs: test
+    runs-on: self-hosted
+    timeout-minutes: 10
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy Recommend container
+        run: |
+          set -e
+          echo "========== Recommend 배포 시작 =========="
+
+          PROJECT_DIR="${PROJECT_DIR:-/Users/yoonhyungjoo/Documents/monglepick}"
+
+          # checkout된 코드를 프로젝트 디렉토리에 동기화
+          rsync -a --delete --exclude='.venv' --exclude='__pycache__' --exclude='.env' \
+            "$GITHUB_WORKSPACE/" "$PROJECT_DIR/monglepick-recommend/"
+
+          cd "$PROJECT_DIR"
+
+          # Recommend 컨테이너만 재빌드 + 재시작
+          docker compose -f docker-compose.staging.yml up -d --build --no-deps recommend
+
+          # 헬스체크 대기 (최대 25초)
+          echo ">>> Recommend 헬스체크 대기..."
+          for i in 1 2 3 4 5; do
+            if curl -sf "http://localhost:8001/health" > /dev/null 2>&1; then
+              echo "  ✅ Recommend OK"
+              break
+            fi
+            echo "  ⏳ Recommend starting... ($i/5)"
+            sleep 5
+          done
+
+          echo "========== ✅ Recommend 배포 완료 =========="

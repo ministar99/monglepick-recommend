@@ -1,0 +1,253 @@
+"""
+Pydantic 요청/응답 스키마 정의
+
+FastAPI 엔드포인트에서 사용하는 모든 요청 바디(Request)와
+응답 바디(Response) 모델을 정의합니다.
+
+네이밍 규칙:
+- 요청: *Request (예: GenreSelectionRequest)
+- 응답: *Response (예: MovieSearchResponse)
+- 내부 DTO: 접미어 없음 (예: MovieBrief, GenreWithMovies)
+"""
+
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+# =========================================
+# 공통 모델
+# =========================================
+
+class MovieBrief(BaseModel):
+    """
+    영화 간략 정보 (검색 결과, 월드컵 후보 등에서 사용)
+
+    DDL 기준: movie_id VARCHAR(50) PK, release_year INT
+    포스터 URL은 TMDB 이미지 기본 URL + poster_path로 조합합니다.
+    """
+    movie_id: str = Field(description="영화 ID (VARCHAR(50), TMDB/KOBIS/KMDb)")
+    title: str = Field(description="한국어 제목")
+    title_en: str | None = Field(default=None, description="영어 원제")
+    genres: list[str] = Field(default_factory=list, description="장르 목록")
+    release_year: int | None = Field(default=None, description="개봉 연도")
+    rating: float | None = Field(default=None, description="평균 평점 (0.0~10.0)")
+    poster_url: str | None = Field(default=None, description="포스터 이미지 전체 URL")
+    overview: str | None = Field(default=None, description="줄거리 요약")
+
+    class Config:
+        from_attributes = True
+
+
+class PaginationMeta(BaseModel):
+    """페이지네이션 메타 정보"""
+    page: int = Field(description="현재 페이지 번호 (1부터 시작)")
+    size: int = Field(description="페이지당 항목 수")
+    total: int = Field(description="전체 항목 수")
+    total_pages: int = Field(description="전체 페이지 수")
+
+
+# =========================================
+# 검색 관련 스키마 (REQ_031~034)
+# =========================================
+
+class MovieSearchResponse(BaseModel):
+    """
+    영화 검색 응답
+
+    검색 결과 목록과 페이지네이션 메타 정보를 포함합니다.
+    필터(장르, 연도, 평점, 국가)와 정렬 옵션이 적용된 결과입니다.
+    """
+    movies: list[MovieBrief] = Field(description="검색 결과 영화 목록")
+    pagination: PaginationMeta = Field(description="페이지네이션 정보")
+
+
+class AutocompleteResponse(BaseModel):
+    """
+    자동완성 응답
+
+    사용자가 입력 중인 키워드에 대한 자동완성 후보를 반환합니다.
+    최대 10건, Redis 캐시 사용 (TTL 5분).
+    """
+    suggestions: list[str] = Field(description="자동완성 키워드 후보 목록 (최대 10건)")
+
+
+class TrendingKeywordItem(BaseModel):
+    """인기 검색어 개별 항목"""
+    rank: int = Field(description="순위 (1부터 시작)")
+    keyword: str = Field(description="검색 키워드")
+    search_count: int = Field(description="검색 횟수")
+
+
+class TrendingResponse(BaseModel):
+    """인기 검색어 TOP 10 응답"""
+    keywords: list[TrendingKeywordItem] = Field(description="인기 검색어 목록")
+
+
+class RecentSearchItem(BaseModel):
+    """최근 검색어 개별 항목"""
+    keyword: str = Field(description="검색 키워드")
+    searched_at: datetime = Field(description="검색 시각")
+
+
+class RecentSearchResponse(BaseModel):
+    """사용자의 최근 검색어 목록 응답 (최대 20건)"""
+    searches: list[RecentSearchItem] = Field(description="최근 검색어 목록")
+
+
+# =========================================
+# 온보딩 관련 스키마 (REQ_016~019)
+# =========================================
+
+class GenreWithMovies(BaseModel):
+    """
+    장르별 대표 영화 포스터 정보
+
+    온보딩 1단계에서 장르 선택 UI에 표시할 데이터입니다.
+    각 장르마다 대표 영화 3~5편의 포스터를 포함합니다.
+    """
+    genre: str = Field(description="장르명 (예: 액션, 로맨스)")
+    representative_movies: list[MovieBrief] = Field(
+        description="해당 장르의 대표 영화 목록 (포스터 표시용)"
+    )
+
+
+class GenreListResponse(BaseModel):
+    """장르 목록 + 대표 영화 포스터 응답"""
+    genres: list[GenreWithMovies] = Field(description="장르별 대표 영화 목록")
+
+
+class GenreSelectionRequest(BaseModel):
+    """
+    장르 선택 요청
+
+    사용자가 온보딩 1단계에서 선택한 호감 장르 목록입니다.
+    최소 3개 이상 선택해야 합니다.
+    """
+    selected_genres: list[str] = Field(
+        min_length=3,
+        description="선택한 장르 목록 (최소 3개)",
+        examples=[["액션", "SF", "스릴러"]],
+    )
+
+
+class GenreSelectionResponse(BaseModel):
+    """장르 선택 저장 완료 응답"""
+    message: str = Field(description="처리 결과 메시지")
+    selected_genres: list[str] = Field(description="저장된 장르 목록")
+
+
+class WorldcupCandidate(BaseModel):
+    """월드컵 대진표의 개별 영화 후보"""
+    movie: MovieBrief = Field(description="영화 정보")
+    seed: int = Field(description="시드 번호 (대진표 배치용)")
+
+
+class WorldcupMatch(BaseModel):
+    """월드컵 개별 매치 (2개 영화 대결)"""
+    match_id: int = Field(description="매치 고유 번호")
+    movie_a: MovieBrief = Field(description="A 영화")
+    movie_b: MovieBrief = Field(description="B 영화")
+
+
+class WorldcupBracketResponse(BaseModel):
+    """
+    월드컵 대진표 응답
+
+    선택한 장르 기반으로 16강 또는 32강 영화 후보를 생성합니다.
+    각 매치는 2개 영화의 대결로 구성됩니다.
+    """
+    round_size: int = Field(description="라운드 크기 (16 또는 32)")
+    matches: list[WorldcupMatch] = Field(description="매치 목록")
+    total_rounds: int = Field(description="총 진행 라운드 수 (예: 16강→8강→4강→결승 = 4)")
+
+
+class WorldcupSelectionRequest(BaseModel):
+    """
+    월드컵 라운드별 선택 결과 제출 요청
+
+    각 매치에서 사용자가 선택한 영화 ID를 전송합니다.
+    클라이언트에서 한 라운드가 끝날 때마다 제출하거나,
+    전체 월드컵 완료 후 일괄 제출할 수 있습니다.
+    """
+    round_size: int = Field(description="현재 라운드 크기 (예: 16, 8, 4, 2)")
+    selections: list[str] = Field(
+        description="각 매치에서 선택한 영화 ID 목록 (순서대로, VARCHAR(50))"
+    )
+    is_final: bool = Field(
+        default=False,
+        description="결승전 여부 (True이면 월드컵 종료)"
+    )
+
+
+class WorldcupSelectionResponse(BaseModel):
+    """월드컵 라운드 선택 결과 응답"""
+    message: str = Field(description="처리 결과")
+    next_round: int | None = Field(
+        default=None,
+        description="다음 라운드 크기 (None이면 월드컵 종료)"
+    )
+    next_matches: list[WorldcupMatch] | None = Field(
+        default=None,
+        description="다음 라운드 매치 목록 (종료 시 None)"
+    )
+
+
+class GenrePreference(BaseModel):
+    """장르별 선호도 점수 (레이더 차트용)"""
+    genre: str = Field(description="장르명")
+    score: float = Field(description="선호도 점수 (0.0~1.0)")
+
+
+class WorldcupResultResponse(BaseModel):
+    """
+    월드컵 결과 분석 응답
+
+    우승/준우승 영화와 장르별 선호도 레이더 차트 데이터를 포함합니다.
+    이 데이터는 user_preferences 테이블에도 반영됩니다.
+    """
+    winner: MovieBrief = Field(description="우승 영화")
+    runner_up: MovieBrief | None = Field(default=None, description="준우승 영화")
+    genre_preferences: list[GenrePreference] = Field(
+        description="장르별 선호도 (레이더 차트 데이터)"
+    )
+    top_genres: list[str] = Field(description="상위 선호 장르 (3개)")
+
+
+class MoodTag(BaseModel):
+    """무드 태그 항목"""
+    id: int = Field(description="무드 태그 ID")
+    name: str = Field(description="무드 태그명 (예: 긴장감있는, 감동적인)")
+    emoji: str = Field(description="대표 이모지")
+
+
+class MoodListResponse(BaseModel):
+    """무드 태그 목록 응답"""
+    moods: list[MoodTag] = Field(description="사용 가능한 무드 태그 목록")
+
+
+class MoodSelectionRequest(BaseModel):
+    """무드 기반 초기 설정 저장 요청"""
+    selected_moods: list[str] = Field(
+        min_length=1,
+        description="선택한 무드 태그 목록",
+        examples=[["긴장감있는", "감동적인", "유쾌한"]],
+    )
+
+
+class MoodSelectionResponse(BaseModel):
+    """무드 선택 저장 완료 응답"""
+    message: str = Field(description="처리 결과")
+    selected_moods: list[str] = Field(description="저장된 무드 목록")
+
+
+class OnboardingStatusResponse(BaseModel):
+    """
+    온보딩 완료 여부 확인 응답
+
+    3단계 전체(장르→월드컵→무드)를 완료했는지 확인합니다.
+    """
+    is_completed: bool = Field(description="온보딩 전체 완료 여부")
+    genre_selected: bool = Field(description="장르 선택 완료 여부")
+    worldcup_completed: bool = Field(description="월드컵 완료 여부")
+    mood_selected: bool = Field(description="무드 선택 완료 여부")

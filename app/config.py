@@ -1,0 +1,116 @@
+"""
+몽글픽 추천 서비스 설정 모듈
+
+pydantic-settings를 사용하여 환경변수에서 설정값을 로드합니다.
+.env 파일 또는 시스템 환경변수에서 자동으로 읽어옵니다.
+
+Spring Boot 백엔드(monglepick-backend)와 공유하는 설정:
+- MySQL 접속 정보 (동일 DB 사용)
+- JWT 시크릿 키 (동일 토큰 검증)
+"""
+
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    """
+    애플리케이션 설정 클래스
+
+    환경변수 또는 .env 파일에서 값을 읽어옵니다.
+    모든 필드에 기본값이 있어 로컬 개발 시 .env 없이도 기동 가능합니다.
+    """
+
+    # -----------------------------------------
+    # MySQL 설정 (Spring Boot 백엔드와 공유)
+    # -----------------------------------------
+    DB_HOST: str = "localhost"
+    DB_PORT: int = 3306
+    DB_NAME: str = "monglepick"
+    DB_USERNAME: str = "monglepick"
+    DB_PASSWORD: str = "monglepick"
+
+    @property
+    def database_url(self) -> str:
+        """SQLAlchemy 비동기 MySQL 접속 URL을 생성합니다."""
+        return (
+            f"mysql+aiomysql://{self.DB_USERNAME}:{self.DB_PASSWORD}"
+            f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+            f"?charset=utf8mb4"
+        )
+
+    # -----------------------------------------
+    # Redis 설정
+    # -----------------------------------------
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 1  # 0번은 monglepick-agent가 사용, 1번 사용
+
+    @property
+    def redis_url(self) -> str:
+        """Redis 접속 URL을 생성합니다."""
+        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+    # -----------------------------------------
+    # JWT 설정 (Spring Boot 백엔드와 동일 시크릿)
+    # -----------------------------------------
+    JWT_SECRET: str = "your-256-bit-secret-key-change-in-production"
+    JWT_ALGORITHM: str = "HS256"
+
+    # -----------------------------------------
+    # 서버 설정
+    # -----------------------------------------
+    SERVER_HOST: str = "0.0.0.0"
+    SERVER_PORT: int = 8001
+
+    # -----------------------------------------
+    # CORS 설정
+    # -----------------------------------------
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """CORS 허용 오리진을 리스트로 변환합니다."""
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
+    # -----------------------------------------
+    # TMDB 이미지 URL
+    # -----------------------------------------
+    TMDB_IMAGE_BASE_URL: str = "https://image.tmdb.org/t/p/w500"
+
+    # -----------------------------------------
+    # 검색 관련 설정
+    # -----------------------------------------
+    # 자동완성 Redis 캐시 TTL (초)
+    AUTOCOMPLETE_CACHE_TTL: int = 300  # 5분
+    # 인기 검색어 집계 기간 (시간)
+    TRENDING_WINDOW_HOURS: int = 24
+    # 인기 검색어 표시 개수
+    TRENDING_TOP_K: int = 10
+    # 최근 검색어 최대 보관 개수
+    RECENT_SEARCH_MAX: int = 20
+
+    # -----------------------------------------
+    # 온보딩 설정
+    # -----------------------------------------
+    # 월드컵 라운드 옵션 (16강 또는 32강)
+    WORLDCUP_ROUNDS: list[int] = [16, 32]
+    # 최소 선택 장르 수
+    MIN_GENRE_SELECTION: int = 3
+
+    class Config:
+        """pydantic-settings 설정: .env 파일에서 환경변수 로드"""
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """
+    Settings 싱글턴 인스턴스를 반환합니다.
+
+    lru_cache 데코레이터로 한 번만 생성되며,
+    이후 호출에서는 캐시된 인스턴스를 반환합니다.
+    """
+    return Settings()
