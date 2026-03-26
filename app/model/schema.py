@@ -8,6 +8,7 @@ FastAPI 엔드포인트에서 사용하는 모든 요청 바디(Request)와
 - 요청: *Request (예: GenreSelectionRequest)
 - 응답: *Response (예: MovieSearchResponse)
 - 내부 DTO: 접미어 없음 (예: MovieBrief, GenreWithMovies)
+test
 """
 
 from datetime import datetime
