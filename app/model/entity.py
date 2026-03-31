@@ -16,7 +16,6 @@ AI Agent가 DDL을 관리하며, 이 서비스는 해당 스키마에 맞춰 매
 
 주의: 모든 PK/FK 타입은 DDL 기준 VARCHAR(50)입니다.
       Integer PK를 사용하지 않습니다.
-      test
 """
 
 import json
