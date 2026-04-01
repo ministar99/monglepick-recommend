@@ -1,21 +1,27 @@
 """
 SQLAlchemy ORM 엔티티 모델 정의
 
-DDL 기준: monglepick-agent/init.sql (18개 테이블)
-AI Agent가 DDL을 관리하며, 이 서비스는 해당 스키마에 맞춰 매핑합니다.
+DDL 기준: Backend JPA 엔티티 (ddl-auto=update, 진실 원본)
+이 서비스는 Backend JPA 스키마에 맞춰 읽기 전용으로 매핑합니다.
 
-공유 테이블 (AI Agent DDL 기준, 읽기 전용):
+공유 테이블 (Backend JPA DDL 기준, 읽기 전용):
 - movies: 영화 경량 참조 (PK: movie_id VARCHAR(50))
 - users: 사용자 기본 정보 (PK: user_id VARCHAR(50))
 - user_preferences: 사용자 취향 프로필 (읽기/쓰기)
+- grades: 사용자 등급 마스터 (PK: grade_id BIGINT, 읽기 전용)
+  └ 2026-03-31 신규: UserGrade enum → DB 테이블로 전환
+- user_points: 사용자 포인트 잔액 (PK: user_point_id BIGINT, 읽기 전용)
+  └ 2026-03-31 변경: point_have → balance, user_grade → grade_id FK
+- achievement_types: 업적 유형 마스터 (PK: achievement_type_id BIGINT, 읽기 전용)
+  └ 2026-03-31 신규: achievement_type VARCHAR → FK 분리
 
 이 서비스가 소유하는 테이블:
 - search_history: 사용자별 최근 검색 이력
 - trending_keywords: 인기 검색어 집계
 - worldcup_results: 이상형 월드컵 결과 저장
 
-주의: 모든 PK/FK 타입은 DDL 기준 VARCHAR(50)입니다.
-      Integer PK를 사용하지 않습니다.
+주의: 비즈니스 키(movie_id/user_id)는 VARCHAR(50)이며,
+      서로게이트 PK는 BIGINT AUTO_INCREMENT입니다.
 """
 
 import json
@@ -46,7 +52,7 @@ AutoIncrementBigInt = BigInteger().with_variant(Integer, "sqlite")
 
 
 # =========================================
-# 공유 테이블 (AI Agent DDL 기준, 읽기 전용 매핑)
+# 공유 테이블 (Backend JPA DDL 기준, 읽기 전용 매핑)
 # =========================================
 
 class Movie(Base):
@@ -321,3 +327,190 @@ class WorldcupResult(Base):
     created_at: datetime = Column(
         DateTime, nullable=False, default=func.now(), comment="생성 시각"
     )
+
+
+# =========================================
+# 공유 테이블 — 등급/포인트/업적 (Backend JPA DDL 기준, 읽기 전용)
+# 2026-03-31 동기화: UserGrade enum → grades 테이블, point_have → balance, achievement_type → FK
+# =========================================
+
+class Grade(Base):
+    """
+    사용자 등급 마스터 엔티티 (읽기 전용).
+
+    Backend JPA: reward.entity.Grade — grades 테이블.
+
+    2026-03-31 신규 추가:
+      기존 UserGrade enum(BRONZE/SILVER/GOLD/PLATINUM) 고정값을 DB 테이블로 전환하여
+      관리자 페이지에서 등급 기준(min_points)과 쿼터(daily_ai_limit 등)를 동적으로 변경할 수 있다.
+
+    이 서비스에서는 등급별 쿼터 조회(읽기) 목적으로만 사용한다.
+    DDL 변경 권한은 Backend JPA(ddl-auto=update)에 있으며, 이 모델은 읽기 전용이다.
+
+    PK: grade_id BIGINT AUTO_INCREMENT (서로게이트 PK)
+    UK: grade_code (BRONZE/SILVER/GOLD/PLATINUM)
+    """
+    __tablename__ = "grades"
+    # extend_existing: 다른 모듈에서 동일 테이블이 이미 등록된 경우 재정의 방지
+    __table_args__ = {"extend_existing": True}
+
+    # ── PK: 등급 레코드 고유 ID (BIGINT AUTO_INCREMENT) ──
+    grade_id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True,
+                           comment="등급 ID (BIGINT AUTO_INCREMENT PK)")
+
+    # 등급 코드 (UNIQUE, NOT NULL) — BRONZE / SILVER / GOLD / PLATINUM
+    # UserGrade enum의 name()과 동일한 값이며 대문자로 관리한다.
+    grade_code: str = Column(String(20), nullable=False, unique=True,
+                             comment="등급 코드 (BRONZE/SILVER/GOLD/PLATINUM)")
+
+    # 등급 한글 표시명 — 관리자 페이지 및 클라이언트 UI 노출용
+    # 예: '브론즈', '실버', '골드', '플래티넘'
+    grade_name: str | None = Column(String(50), nullable=True,
+                                    comment="등급 한글 표시명 (예: 브론즈)")
+
+    # 최소 누적 획득 포인트 — 이 값 이상이면 해당 등급 부여
+    # 포인트를 소비해도 등급은 하락하지 않음 (누적 기준)
+    min_points: int = Column(Integer, nullable=False, comment="등급 달성 최소 누적 포인트")
+
+    # 일일 AI 추천 한도 (-1 이면 무제한, PLATINUM)
+    daily_ai_limit: int | None = Column(Integer, nullable=True,
+                                        comment="일일 AI 추천 한도 (-1=무제한)")
+
+    # 월간 AI 추천 한도 (-1 이면 무제한, PLATINUM)
+    monthly_ai_limit: int | None = Column(Integer, nullable=True,
+                                          comment="월간 AI 추천 한도 (-1=무제한)")
+
+    # 무료 일일 AI 추천 횟수 — 이 횟수까지 포인트 미차감
+    free_daily_count: int | None = Column(Integer, nullable=True,
+                                          comment="무료 일일 AI 추천 횟수")
+
+    # 최대 입력 글자 수 — 등급이 높을수록 더 긴 메시지 허용
+    max_input_length: int | None = Column(Integer, nullable=True,
+                                          comment="최대 입력 글자 수")
+
+    # 표시 정렬 순서 (오름차순, BRONZE=1 ... PLATINUM=4)
+    sort_order: int | None = Column(Integer, nullable=True,
+                                    comment="정렬 순서 (낮을수록 앞에 표시)")
+
+    # 활성 여부 — false이면 쿼터 조회에서 제외
+    is_active: bool = Column(Boolean, nullable=True, default=True,
+                             comment="등급 활성 여부")
+
+
+class UserPoint(Base):
+    """
+    사용자 포인트 잔액 엔티티 (읽기 전용).
+
+    Backend JPA: reward.entity.UserPoint — user_points 테이블.
+
+    2026-03-31 변경 사항 동기화:
+      1. point_have (VARCHAR 시절 잔액 컬럼) → balance (INTEGER) 로 컬럼명 변경
+      2. user_grade VARCHAR(ENUM 문자열) → grade_id BIGINT FK (→ grades.grade_id) 로 변경
+
+    이 서비스에서는 사용자 잔액 및 등급 조회(읽기) 목적으로만 사용한다.
+    포인트 차감/적립은 Backend REST API를 통해서만 수행한다.
+
+    PK: user_point_id BIGINT AUTO_INCREMENT (서로게이트 PK)
+    UK: user_id (사용자 1명당 포인트 레코드 1개)
+    FK: grade_id → grades.grade_id (LAZY, null=BRONZE fallback)
+    """
+    __tablename__ = "user_points"
+    __table_args__ = {"extend_existing": True}
+
+    # ── PK: 포인트 레코드 고유 ID (BIGINT AUTO_INCREMENT) ──
+    # 기존 필드명: point_id → user_point_id (Backend JPA 2026-03-24 변경)
+    user_point_id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True,
+                                comment="포인트 레코드 ID (BIGINT AUTO_INCREMENT PK)")
+
+    # 사용자 ID (VARCHAR(50), NOT NULL, UNIQUE)
+    # users.user_id를 참조하며, 사용자 1명당 반드시 1개만 존재해야 한다.
+    user_id: str = Column(String(50), nullable=False, unique=True,
+                          comment="사용자 ID (UK)")
+
+    # ── 잔액 컬럼 (2026-03-31 변경: point_have → balance) ──
+    # Backend JPA UserPoint.balance 필드와 동일한 컬럼명.
+    # 이전 컬럼명 'point_have'는 더 이상 사용하지 않는다.
+    balance: int = Column(Integer, nullable=True, default=0,
+                          comment="현재 보유 포인트 (구 point_have)")
+
+    # 누적 획득 포인트 (가입 이후 전체 합산, 등급 판정 기준)
+    total_earned: int = Column(Integer, nullable=True, default=0,
+                               comment="누적 획득 포인트 (등급 판정 기준)")
+
+    # 오늘 획득 포인트 (일일 한도 관리용)
+    daily_earned: int = Column(Integer, nullable=True, default=0,
+                               comment="오늘 획득 포인트 (일일 한도 관리용)")
+
+    # 일일 리셋 기준일 (날짜가 바뀌면 daily_earned를 0으로 초기화)
+    daily_reset: datetime | None = Column(DateTime, nullable=True,
+                                          comment="일일 리셋 기준일")
+
+    # ── 등급 FK (2026-03-31 변경: user_grade VARCHAR → grade_id BIGINT FK) ──
+    # Backend JPA @ManyToOne(fetch=LAZY) @JoinColumn(name="grade_id")와 동일.
+    # 이 서비스에서는 FK 정수값만 저장하며, Grade 엔티티 조인이 필요할 때 별도 쿼리를 사용한다.
+    # null이면 서비스 레이어에서 BRONZE 등급으로 fallback 처리한다.
+    grade_id: int | None = Column(AutoIncrementBigInt, nullable=True,
+                                  comment="등급 ID FK (→ grades.grade_id, 구 user_grade)")
+
+
+class AchievementType(Base):
+    """
+    업적 유형 마스터 엔티티 (읽기 전용).
+
+    Backend JPA: roadmap.entity.AchievementType — achievement_types 테이블.
+
+    2026-03-31 신규 추가:
+      기존 user_achievements.achievement_type VARCHAR(50) 단일 컬럼을
+      achievement_types 마스터 테이블 + FK 구조로 분리.
+      업적 메타정보(표시명·보상·아이콘 등)를 DB에서 동적으로 관리할 수 있다.
+
+    이 서비스에서는 업적 유형 메타데이터 조회(읽기) 목적으로만 사용한다.
+
+    PK: achievement_type_id BIGINT AUTO_INCREMENT (서로게이트 PK)
+    UK: achievement_code (예: "course_complete", "quiz_perfect")
+
+    기본 업적 유형 (앱 시작 시 AchievementInitializer에서 INSERT):
+      - course_complete  : 도장깨기 코스 완주 (보상 100P)
+      - quiz_perfect     : 퀴즈 만점 달성 (보상 50P)
+      - review_count_10  : 리뷰 10개 작성 (보상 200P)
+      - genre_explorer   : 5개 장르 탐험 (보상 150P)
+    """
+    __tablename__ = "achievement_types"
+    __table_args__ = {"extend_existing": True}
+
+    # ── PK: 업적 유형 고유 ID (BIGINT AUTO_INCREMENT) ──
+    # user_achievements.achievement_type_id FK가 이 값을 참조한다.
+    achievement_type_id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True,
+                                      comment="업적 유형 ID (BIGINT AUTO_INCREMENT PK)")
+
+    # 업적 코드 — 시스템 내부 식별자 (UNIQUE, NOT NULL)
+    # 영문 소문자+언더스코어 형식. 서비스 로직에서 업적 달성 판정 시 이 값으로 조회한다.
+    # 예: "course_complete", "quiz_perfect", "review_count_10", "genre_explorer"
+    achievement_code: str = Column(String(50), nullable=False, unique=True,
+                                   comment="업적 코드 (예: course_complete)")
+
+    # 업적 표시명 — 한국어 사용자 화면 노출 이름 (NOT NULL)
+    # 예: "코스 완주", "퀴즈 만점", "리뷰 10개 달성", "5개 장르 탐험"
+    achievement_name: str = Column(String(100), nullable=False,
+                                   comment="업적 표시명 (한국어)")
+
+    # 업적 설명 — 달성 조건 및 내용 (선택)
+    description: str | None = Column(String(500), nullable=True,
+                                     comment="업적 설명 및 달성 조건")
+
+    # 달성 조건 횟수 (선택 — null이면 1회 달성 완료형)
+    # 예: review_count_10 → 10, genre_explorer → 5
+    required_count: int | None = Column(Integer, nullable=True,
+                                        comment="달성 조건 횟수 (null=1회)")
+
+    # 업적 달성 시 지급되는 보상 포인트 (선택 — null이면 포인트 보상 없음)
+    reward_points: int | None = Column(Integer, nullable=True,
+                                       comment="달성 보상 포인트 (null=없음)")
+
+    # 업적 아이콘 URL (선택) — 프론트엔드에서 배지 이미지 렌더링에 사용
+    icon_url: str | None = Column(String(500), nullable=True,
+                                  comment="업적 아이콘 URL")
+
+    # 활성 여부 — false이면 새 달성 기록이 생성되지 않음 (기존 기록 보존)
+    is_active: bool = Column(Boolean, nullable=True, default=True,
+                             comment="업적 활성 여부 (false=신규 달성 불가)")
