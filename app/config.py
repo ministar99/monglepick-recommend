@@ -111,6 +111,19 @@ class Settings(BaseSettings):
     # 최소 선택 장르 수
     MIN_GENRE_SELECTION: int = 3
 
+    # -----------------------------------------
+    # 영화 좋아요 (write-behind 캐시) 설정
+    # 2026-04-07 신규: Backend monglepick-backend에서 recommend로 이관
+    # Redis dirty 큐를 주기적으로 드레인하여 MySQL에 배치 반영한다.
+    # -----------------------------------------
+    # dirty 큐 flush 주기 (초). 짧을수록 데이터 손실 위험이 줄지만 DB 부하 증가.
+    # 기본값 60초 = 최악의 경우 1분치 토글이 Redis 장애 시 손실 가능.
+    LIKE_FLUSH_INTERVAL_SECONDS: int = 60
+    # flush 스케줄러 활성화 여부 (테스트 환경에서는 False로 두어 무한 루프 방지)
+    LIKE_FLUSH_ENABLED: bool = True
+    # 한 번의 flush 배치에서 최대 처리 가능한 dirty 엔트리 수 (과도한 한 배치 방지)
+    LIKE_FLUSH_BATCH_MAX: int = 1000
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
