@@ -24,13 +24,15 @@ from app.config import get_settings
 # ─────────────────────────────────────────
 # SQLAlchemy 비동기 엔진 생성
 # ─────────────────────────────────────────
-# echo=False: SQL 로그 비활성화 (디버깅 시 True로 변경)
+# echo: settings.SQL_ECHO 플래그 로 제어 (개발/디버깅 시 .env SQL_ECHO=true)
+#   - True  → 실행된 SQL 과 바인딩 파라미터가 sqlalchemy.engine 로거로 INFO 출력
+#   - False → 로그 비활성 (운영 기본값)
 # pool_size=20: Spring Boot HikariCP maximum-pool-size와 동일
 # pool_recycle=1800: 30분마다 커넥션 재생성 (MySQL wait_timeout 대응)
 _settings = get_settings()
 engine = create_async_engine(
     _settings.database_url,
-    echo=False,
+    echo=_settings.SQL_ECHO,
     pool_size=20,
     max_overflow=10,
     pool_recycle=1800,
