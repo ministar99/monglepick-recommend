@@ -18,9 +18,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
+from app.v2.api.router import api_v2_router
 from app.config import get_settings
 from app.core.database import close_db, init_db
 from app.core.redis import close_redis, init_redis
+from app.v2.core.database import close_pool, init_pool
 
 # ─────────────────────────────────────────
 # 로깅 설정
@@ -51,13 +53,18 @@ async def lifespan(app: FastAPI):
     logger.info("몽글픽 추천 서비스 시작 중...")
     logger.info("=" * 50)
 
-    # MySQL 초기화 (search_history, trending_keywords 등 테이블 생성)
+    # MySQL 초기화 — v1(SQLAlchemy) + v2(aiomysql Raw SQL) 동시 초기화
     try:
         await init_db()
-        logger.info("[OK] MySQL 비동기 엔진 초기화 완료")
+        logger.info("[OK] MySQL 비동기 엔진 초기화 완료 (v1 SQLAlchemy)")
     except Exception as e:
-        logger.error(f"[FAIL] MySQL 초기화 실패: {e}")
-        # DB 없이도 일부 기능(헬스체크 등)은 동작하도록 에러 전파하지 않음
+        logger.error(f"[FAIL] MySQL v1 초기화 실패: {e}")
+
+    try:
+        await init_pool()
+        logger.info("[OK] MySQL 커넥션 풀 초기화 완료 (v2 aiomysql Raw SQL)")
+    except Exception as e:
+        logger.error(f"[FAIL] MySQL v2 초기화 실패: {e}")
 
     # Redis 초기화
     try:
@@ -77,7 +84,8 @@ async def lifespan(app: FastAPI):
     # ── 종료 ──
     logger.info("몽글픽 추천 서비스 종료 중...")
     await close_redis()
-    await close_db()
+    await close_pool()   # v2 aiomysql 커넥션 풀 종료
+    await close_db()     # v1 SQLAlchemy 엔진 종료
     logger.info("리소스 정리 완료")
 
 
@@ -111,8 +119,11 @@ app.add_middleware(
 
 # ─────────────────────────────────────────
 # API 라우터 등록
+# v1: /api/v1/* (SQLAlchemy ORM)
+# v2: /api/v2/* (Raw SQL, aiomysql)
 # ─────────────────────────────────────────
 app.include_router(api_router)
+app.include_router(api_v2_router)
 
 
 # ─────────────────────────────────────────
