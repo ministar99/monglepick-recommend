@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = Field(...)
 
     # -----------------------------------------
+    # SQL 로깅 (개발/디버깅용)
+    # -----------------------------------------
+    # True 로 설정하면 v1(SQLAlchemy)과 v2(aiomysql Raw SQL) 양쪽 모두
+    # 실행된 쿼리를 logger 로 출력한다.
+    # - v1: SQLAlchemy echo=True 와 동일 (sqlalchemy.engine 로거 INFO 레벨)
+    # - v2: aiomysql DictCursor/Cursor 를 LoggingDictCursor/LoggingCursor 로 교체
+    # 운영에서는 반드시 False 유지 (성능 및 민감정보 로그 누출 방지)
+    SQL_ECHO: bool = Field(default=False)
+
+    # -----------------------------------------
     # MySQL 설정 (Spring Boot 백엔드와 공유)
     # -----------------------------------------
     DB_HOST: str = Field(...)

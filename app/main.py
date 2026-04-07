@@ -36,6 +36,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────
+# SQL 쿼리 로깅 (SQL_ECHO=true 일 때만)
+# v1: SQLAlchemy 엔진은 `sqlalchemy.engine` 로거로 출력하며,
+#     create_async_engine(echo=settings.SQL_ECHO) 설정과 연동된다.
+#     echo=True 기본 수준은 INFO 이지만, 파라미터 바인딩까지 보려면 DEBUG 필요.
+# v2: `monglepick.recommend.sql` 로거로 LoggingDictCursor 가 쿼리를 DEBUG 로 출력.
+#     => 루트 레벨은 INFO 그대로 두고, 두 로거만 DEBUG 로 승격한다.
+# ─────────────────────────────────────────
+_settings_for_logging = get_settings()
+if _settings_for_logging.SQL_ECHO:
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.INFO)
+    logging.getLogger("monglepick.recommend.sql").setLevel(logging.DEBUG)
+    logger.info("[SQL_ECHO] v1 SQLAlchemy + v2 aiomysql 쿼리 로깅 활성화")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
