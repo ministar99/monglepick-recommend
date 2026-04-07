@@ -13,7 +13,7 @@ test
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # =========================================
@@ -276,6 +276,41 @@ class MoodSelectionResponse(BaseModel):
     """무드 선택 저장 완료 응답"""
     message: str = Field(description="처리 결과")
     selected_moods: list[str] = Field(description="저장된 무드 목록")
+
+
+# =========================================
+# 영화 좋아요 관련 스키마 (movie Like 도메인)
+# =========================================
+# Backend(Spring Boot) `LikeResponse` record와 JSON 키(camelCase)까지 1:1 일치하도록
+# populate_by_name + alias를 사용한다. 클라이언트는 `liked` / `likeCount` 필드를
+# 그대로 읽을 수 있으므로, 이관 전후로 프론트엔드 변경이 필요 없다.
+# Redis 캐싱 + TTL 만료 시 RDB 적재(write-behind) 패턴을 채택하며,
+# 이 스키마는 toggle/is_liked/count 세 API에서 공통으로 사용된다.
+
+class LikeResponse(BaseModel):
+    """
+    영화 좋아요 응답 (공통).
+
+    Backend monglepick-backend `LikeResponse` record와 완전히 동일한 JSON 구조를
+    반환하도록 camelCase alias를 사용한다. 이 덕분에 Nginx 경로 라우팅만으로
+    백엔드 → recommend(FastAPI) 이관 시 클라이언트 수정이 불필요하다.
+
+    필드:
+    - liked: 현재 사용자의 활성 좋아요 여부 (공개 count API에서는 항상 false 고정)
+    - likeCount: 해당 영화의 전체 활성 좋아요 수
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    liked: bool = Field(
+        description="현재 사용자의 활성 좋아요 여부",
+    )
+    like_count: int = Field(
+        default=0,
+        alias="likeCount",
+        description="해당 영화의 전체 활성 좋아요 수",
+        ge=0,
+        serialization_alias="likeCount",
+    )
 
 
 class OnboardingStatusResponse(BaseModel):
