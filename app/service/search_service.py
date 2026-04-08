@@ -37,6 +37,7 @@ from app.model.schema import (
 from app.repository.movie_repository import MovieRepository
 from app.repository.search_history_repository import SearchHistoryRepository
 from app.repository.trending_repository import TrendingRepository
+from app.search_genre_catalog import expand_search_genre_aliases, normalize_search_genre_labels
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class SearchService:
         keyword: str | None = None,
         search_type: str = "title",
         genre: str | None = None,
+        genres: list[str] | None = None,
         year_from: int | None = None,
         year_to: int | None = None,
         rating_min: float | None = None,
@@ -84,6 +86,7 @@ class SearchService:
             keyword: 검색 키워드
             search_type: 검색 대상 ("title", "director", "actor", "all")
             genre: 장르 필터
+            genres: 장르만 검색할 때 사용하는 다중 선택 장르 라벨 목록
             year_from: 시작 연도
             year_to: 끝 연도
             rating_min: 최소 평점
@@ -100,18 +103,31 @@ class SearchService:
         # 입력값 정규화
         page = max(1, page)
         size = min(max(1, size), 100)  # 최대 100건
+        keyword_cleaned = keyword.strip() if keyword and keyword.strip() else None
+        selected_genres = normalize_search_genre_labels(genres)
+        expanded_genres = expand_search_genre_aliases(selected_genres)
+        is_genre_discovery_search = keyword_cleaned is None and bool(selected_genres)
+        search_history_keyword = (
+            keyword_cleaned if keyword_cleaned is not None else ",".join(selected_genres)
+        ) or None
+        # 장르 탐색 검색은 평점 신뢰도를 위해 최소 평점 참여 인원 수를 함께 적용합니다.
+        genre_discovery_vote_count_min = (
+            self._settings.GENRE_DISCOVERY_MIN_VOTE_COUNT if is_genre_discovery_search else None
+        )
 
         # ─────────────────────────────────────
         # MySQL 검색 실행
         # ─────────────────────────────────────
         movies, total = await self._movie_repo.search(
-            keyword=keyword,
+            keyword=keyword_cleaned,
             search_type=search_type,
             genre=genre,
+            genres=expanded_genres if is_genre_discovery_search else None,
             year_from=year_from,
             year_to=year_to,
             rating_min=rating_min,
             rating_max=rating_max,
+            vote_count_min=genre_discovery_vote_count_min,
             sort_by=sort_by,
             sort_order=sort_order,
             page=page,
@@ -121,9 +137,7 @@ class SearchService:
         # ─────────────────────────────────────
         # 부수 작업: 검색 이력 + 인기 검색어 갱신
         # ─────────────────────────────────────
-        if keyword and keyword.strip():
-            keyword_cleaned = keyword.strip()
-
+        if search_history_keyword:
             # 검색 히스토리는 "검색 실행" 자체만 기록합니다.
             # 무한 스크롤로 이어지는 2페이지 이후 요청은 같은 검색 세션의 연장선이므로 저장하지 않습니다.
             should_track_search_event = page == 1
@@ -133,11 +147,13 @@ class SearchService:
                 try:
                     await self._history_repo.add_search(
                         user_id=user_id,
-                        keyword=keyword_cleaned,
+                        keyword=search_history_keyword,
                         result_count=total,
                         filters=self._build_search_filters(
+                            search_mode="genre_discovery" if is_genre_discovery_search else "keyword",
                             search_type=search_type,
                             genre=genre,
+                            genres=selected_genres,
                             year_from=year_from,
                             year_to=year_to,
                             rating_min=rating_min,
@@ -152,18 +168,20 @@ class SearchService:
                     # 검색 이력 저장 실패가 검색 자체를 방해하면 안 됨
                     logger.warning(f"검색 이력 저장 실패 (user_id={user_id}): {e}")
 
-            # Redis 인기 검색어 점수 증가 (Sorted Set)
-            if self._redis is not None:
+            # Redis 인기 검색어 점수 증가는 텍스트 검색어에만 적용합니다.
+            # 장르 탐색 검색은 큐레이션 성격이 강해 실시간 키워드 집계에서 제외합니다.
+            if self._redis is not None and keyword_cleaned is not None:
                 try:
                     await self._redis.zincrby("trending:keywords", 1, keyword_cleaned)
                 except Exception as e:
                     logger.warning(f"Redis 인기 검색어 갱신 실패: {e}")
 
-            # MySQL 인기 검색어 백업 (비동기, 실패해도 무시)
-            try:
-                await self._trending_repo.increment(keyword_cleaned)
-            except Exception as e:
-                logger.warning(f"MySQL 인기 검색어 저장 실패: {e}")
+            # MySQL 인기 검색어 백업도 텍스트 검색어에만 적용합니다.
+            if keyword_cleaned is not None:
+                try:
+                    await self._trending_repo.increment(keyword_cleaned)
+                except Exception as e:
+                    logger.warning(f"MySQL 인기 검색어 저장 실패: {e}")
 
         # ─────────────────────────────────────
         # 응답 변환
@@ -205,7 +223,11 @@ class SearchService:
             limit=page_limit,
         )
         items = [
-            RecentSearchItem(keyword=r.keyword, searched_at=r.searched_at)
+            RecentSearchItem(
+                keyword=r.keyword,
+                searched_at=r.searched_at,
+                filters=r.filters,
+            )
             for r in records
         ]
         next_offset = offset + len(items) if has_more else None
@@ -292,8 +314,10 @@ class SearchService:
     def _build_search_filters(
         self,
         *,
+        search_mode: str,
         search_type: str,
         genre: str | None,
+        genres: list[str] | None,
         year_from: int | None,
         year_to: int | None,
         rating_min: float | None,
@@ -305,8 +329,10 @@ class SearchService:
     ) -> dict:
         """검색 시 적용한 조건을 직렬화 가능한 dict로 정리합니다."""
         return {
+            "search_mode": search_mode,
             "search_type": search_type,
             "genre": genre,
+            "genres": genres,
             "year_from": year_from,
             "year_to": year_to,
             "rating_min": rating_min,

@@ -122,10 +122,23 @@ class TrendingResponse(BaseModel):
     keywords: list[TrendingKeywordItem] = Field(description="인기 검색어 목록")
 
 
+class SearchGenreOption(BaseModel):
+    """검색 페이지 장르 선택 옵션"""
+    label: str = Field(description="사용자에게 노출할 장르 라벨")
+    aliases: list[str] = Field(description="movies.genres JSON 매칭에 사용할 실제 장르명 목록")
+    contents_count: int = Field(description="병합/정제 이후 장르별 컨텐츠 수")
+
+
+class SearchGenreOptionsResponse(BaseModel):
+    """검색 페이지 장르 옵션 목록 응답"""
+    genres: list[SearchGenreOption] = Field(description="검색용 장르 옵션 목록")
+
+
 class RecentSearchItem(BaseModel):
     """최근 검색어 개별 항목"""
     keyword: str = Field(description="검색 키워드")
     searched_at: datetime = Field(description="검색 시각")
+    filters: dict[str, Any] | None = Field(default=None, description="검색 시 적용한 필터 정보")
 
 
 class RecentSearchPagination(BaseModel):

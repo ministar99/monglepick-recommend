@@ -42,6 +42,7 @@ async def _insert_test_movies(session: AsyncSession) -> list[Movie]:
             genres=["SF", "드라마"],
             release_year=2014,
             rating=8.6,
+            vote_count=150,
             poster_path="/interstellar.jpg",
             director="크리스토퍼 놀란",
             trailer_url="https://youtu.be/zSWdZVtXT7E",
@@ -54,6 +55,7 @@ async def _insert_test_movies(session: AsyncSession) -> list[Movie]:
             genres=["드라마", "스릴러"],
             release_year=2019,
             rating=8.5,
+            vote_count=120,
             poster_path="/parasite.jpg",
             director="봉준호",
         ),
@@ -65,6 +67,7 @@ async def _insert_test_movies(session: AsyncSession) -> list[Movie]:
             genres=["액션", "SF"],
             release_year=2019,
             rating=8.4,
+            vote_count=95,
             poster_path="/endgame.jpg",
             director="안소니 루소",
         ),
@@ -76,6 +79,7 @@ async def _insert_test_movies(session: AsyncSession) -> list[Movie]:
             genres=["로맨스", "뮤지컬"],
             release_year=2016,
             rating=8.0,
+            vote_count=80,
             poster_path="/lalaland.jpg",
             director="데이미언 셔젤",
         ),
@@ -116,6 +120,57 @@ async def test_search_movies_by_title(client: AsyncClient, async_session: AsyncS
     assert len(data["movies"]) == 1
     assert data["movies"][0]["title"] == "인터스텔라"
     assert data["movies"][0]["trailer_url"] == "https://youtu.be/zSWdZVtXT7E"
+
+
+@pytest.mark.asyncio
+async def test_search_genre_options_endpoint_returns_filtered_catalog(client: AsyncClient):
+    """검색용 장르 목록은 정제 규칙이 반영된 형태로 반환됩니다."""
+    response = await client.get("/api/v1/search/genres")
+    assert response.status_code == 200
+
+    data = response.json()
+    labels = [item["label"] for item in data["genres"]]
+
+    assert "공포" in labels
+    assert "모험" in labels
+    assert "청춘/하이틴" in labels
+    assert "코메디" not in labels
+    assert "에로" not in labels
+    assert all(item["contents_count"] > 20 for item in data["genres"])
+
+
+@pytest.mark.asyncio
+async def test_search_movies_by_selected_genres_without_keyword(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """장르 탐색 검색은 평점 참여 인원 수 100명 이상 영화만 평점순으로 반환합니다."""
+    await _insert_test_movies(async_session)
+
+    response = await client.get(
+        "/api/v1/search/movies",
+        params={"genres": "액션,드라마"},
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    titles = [movie["title"] for movie in data["movies"]]
+
+    assert "인터스텔라" in titles
+    assert "기생충" in titles
+    assert "어벤져스: 엔드게임" not in titles
+    assert data["pagination"]["total"] == 2
+    assert [movie["vote_count"] for movie in data["movies"]] == [150, 120]
+    assert [movie["rating"] for movie in data["movies"]] == [8.6, 8.5]
+
+    history_result = await async_session.execute(
+        select(SearchHistory).where(SearchHistory.keyword == "액션,드라마")
+    )
+    history_records = list(history_result.scalars())
+
+    assert len(history_records) == 1
+    assert history_records[0].filters["search_mode"] == "genre_discovery"
+    assert history_records[0].filters["genres"] == ["액션", "드라마"]
 
 
 @pytest.mark.asyncio
