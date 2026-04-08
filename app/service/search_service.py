@@ -31,6 +31,7 @@ from app.model.schema import (
     MovieSearchResponse,
     PaginationMeta,
     RecentSearchItem,
+    RecentSearchPagination,
     RecentSearchResponse,
 )
 from app.repository.movie_repository import MovieRepository
@@ -123,8 +124,12 @@ class SearchService:
         if keyword and keyword.strip():
             keyword_cleaned = keyword.strip()
 
+            # 검색 히스토리는 "검색 실행" 자체만 기록합니다.
+            # 무한 스크롤로 이어지는 2페이지 이후 요청은 같은 검색 세션의 연장선이므로 저장하지 않습니다.
+            should_track_search_event = page == 1
+
             # 로그인 사용자의 검색 이력 저장
-            if user_id:
+            if user_id and should_track_search_event:
                 try:
                     await self._history_repo.add_search(
                         user_id=user_id,
@@ -176,22 +181,43 @@ class SearchService:
             ),
         )
 
-    async def get_recent_searches(self, user_id: str) -> RecentSearchResponse:
+    async def get_recent_searches(
+        self,
+        user_id: str,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> RecentSearchResponse:
         """
         사용자의 최근 검색어를 반환합니다.
 
         Args:
             user_id: 사용자 ID
+            offset: 중복 제거된 목록 기준 시작 위치
+            limit: 페이지당 반환 건수 (최대 30건)
 
         Returns:
-            RecentSearchResponse: 최근 검색어 목록 (최대 20건)
+            RecentSearchResponse: 최근 검색어 목록 + 페이지네이션 정보
         """
-        records = await self._history_repo.get_recent(user_id)
+        page_limit = min(limit or self._settings.RECENT_SEARCH_MAX, self._settings.RECENT_SEARCH_MAX)
+        records, has_more = await self._history_repo.get_recent_page(
+            user_id=user_id,
+            offset=offset,
+            limit=page_limit,
+        )
         items = [
             RecentSearchItem(keyword=r.keyword, searched_at=r.searched_at)
             for r in records
         ]
-        return RecentSearchResponse(searches=items)
+        next_offset = offset + len(items) if has_more else None
+        return RecentSearchResponse(
+            searches=items,
+            pagination=RecentSearchPagination(
+                offset=offset,
+                limit=page_limit,
+                has_more=has_more,
+                next_offset=next_offset,
+            ),
+        )
 
     async def log_search_click(
         self,
