@@ -343,6 +343,143 @@ async def test_recent_searches_deduplicate_same_keyword(
 
 
 @pytest.mark.asyncio
+async def test_search_history_is_not_saved_for_pagination_requests(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """무한 스크롤용 2페이지 이후 요청은 검색 히스토리에 저장하지 않습니다."""
+    await _insert_test_movies(async_session)
+
+    extra_movies = [
+        Movie(
+            movie_id="500",
+            title="테스트 시리즈 1",
+            title_en="Test Series 1",
+            overview="페이지네이션 테스트용 영화 1",
+            genres=["드라마"],
+            release_year=2020,
+            rating=7.1,
+            poster_path="/test-series-1.jpg",
+            director="테스트 감독",
+        ),
+        Movie(
+            movie_id="600",
+            title="테스트 시리즈 2",
+            title_en="Test Series 2",
+            overview="페이지네이션 테스트용 영화 2",
+            genres=["드라마"],
+            release_year=2021,
+            rating=7.2,
+            poster_path="/test-series-2.jpg",
+            director="테스트 감독",
+        ),
+    ]
+    for movie in extra_movies:
+        async_session.add(movie)
+    await async_session.flush()
+
+    first_response = await client.get(
+        "/api/v1/search/movies",
+        params={"q": "테스트", "page": 1, "size": 1},
+    )
+    second_response = await client.get(
+        "/api/v1/search/movies",
+        params={"q": "테스트", "page": 2, "size": 1},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+
+    result = await async_session.execute(
+        select(SearchHistory).where(SearchHistory.keyword == "테스트")
+    )
+    records = list(result.scalars())
+
+    assert len(records) == 1
+    assert records[0].filters["page"] == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_searches_limit_30_with_deduplication(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """최근 검색어는 중복 제거 후 최대 30개까지만 노출됩니다."""
+    await _insert_test_movies(async_session)
+
+    for idx in range(35):
+        keyword = f"테스트키워드-{idx}"
+        await client.get("/api/v1/search/movies", params={"q": keyword})
+
+    # 가장 최신 키워드를 한 번 더 검색해도 결과 목록에는 중복 없이 1회만 노출돼야 함
+    await client.get("/api/v1/search/movies", params={"q": "테스트키워드-34"})
+
+    response = await client.get("/api/v1/search/recent")
+    assert response.status_code == 200
+
+    data = response.json()
+    searches = data["searches"]
+    keywords = [item["keyword"] for item in searches]
+
+    assert len(searches) == 30
+    assert len(set(keywords)) == 30
+    assert keywords[0] == "테스트키워드-34"
+    assert "테스트키워드-5" in keywords
+    assert "테스트키워드-4" not in keywords
+    assert data["pagination"]["offset"] == 0
+    assert data["pagination"]["limit"] == 30
+    assert data["pagination"]["has_more"] is True
+    assert data["pagination"]["next_offset"] == 30
+
+
+@pytest.mark.asyncio
+async def test_recent_searches_support_offset_pagination_without_duplicates(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """최근 검색어는 offset 기반으로 더 오래된 고유 키워드를 이어서 조회할 수 있습니다."""
+    await _insert_test_movies(async_session)
+
+    for idx in range(65):
+        keyword = f"페이지키워드-{idx}"
+        await client.get("/api/v1/search/movies", params={"q": keyword})
+
+    # 중복 검색이 있어도 페이지 간 목록에는 같은 키워드가 다시 나오지 않아야 함
+    await client.get("/api/v1/search/movies", params={"q": "페이지키워드-64"})
+    await client.get("/api/v1/search/movies", params={"q": "페이지키워드-40"})
+
+    first_response = await client.get("/api/v1/search/recent", params={"offset": 0, "limit": 30})
+    second_response = await client.get("/api/v1/search/recent", params={"offset": 30, "limit": 30})
+    third_response = await client.get("/api/v1/search/recent", params={"offset": 60, "limit": 30})
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert third_response.status_code == 200
+
+    first_data = first_response.json()
+    second_data = second_response.json()
+    third_data = third_response.json()
+
+    first_keywords = [item["keyword"] for item in first_data["searches"]]
+    second_keywords = [item["keyword"] for item in second_data["searches"]]
+    third_keywords = [item["keyword"] for item in third_data["searches"]]
+
+    assert len(first_keywords) == 30
+    assert len(second_keywords) == 30
+    assert len(third_keywords) == 5
+    assert set(first_keywords).isdisjoint(second_keywords)
+    assert set(first_keywords).isdisjoint(third_keywords)
+    assert set(second_keywords).isdisjoint(third_keywords)
+
+    assert first_data["pagination"]["has_more"] is True
+    assert first_data["pagination"]["next_offset"] == 30
+    assert second_data["pagination"]["has_more"] is True
+    assert second_data["pagination"]["next_offset"] == 60
+    assert third_data["pagination"]["has_more"] is False
+    assert third_data["pagination"]["next_offset"] is None
+
+
+@pytest.mark.asyncio
 async def test_log_search_click_inserts_per_click(
     client: AsyncClient,
     async_session: AsyncSession,

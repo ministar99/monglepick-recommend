@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     # 인기 검색어 표시 개수
     TRENDING_TOP_K: int = 10
     # 최근 검색어 최대 보관 개수
-    RECENT_SEARCH_MAX: int = 20
+    RECENT_SEARCH_MAX: int = 10
 
     # -----------------------------------------
     # 온보딩 설정

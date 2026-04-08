@@ -74,7 +74,33 @@ class SearchHistoryRepository:
         Returns:
             최근 검색 이력 목록 (최신순 정렬)
         """
-        max_count = limit or self._settings.RECENT_SEARCH_MAX
+        records, _ = await self.get_recent_page(user_id=user_id, offset=0, limit=limit)
+        return records
+
+    async def get_recent_page(
+        self,
+        user_id: str,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> tuple[list[SearchHistory], bool]:
+        """
+        사용자의 최근 검색어를 페이지 단위로 반환합니다.
+
+        중복 키워드는 가장 최근 레코드 1건만 남기고,
+        offset은 "중복 제거가 끝난 목록" 기준으로 계산합니다.
+
+        Args:
+            user_id: 사용자 ID
+            offset: 중복 제거된 목록 기준 시작 위치
+            limit: 최대 반환 건수 (None이면 설정값 사용)
+
+        Returns:
+            tuple[list[SearchHistory], bool]:
+                - 현재 페이지의 최근 검색 이력 목록
+                - 다음 페이지 존재 여부
+        """
+        start_offset = max(0, offset)
+        max_count = min(limit or self._settings.RECENT_SEARCH_MAX, self._settings.RECENT_SEARCH_MAX)
         result = await self._session.execute(
             select(SearchHistory)
             .where(SearchHistory.user_id == user_id)
@@ -83,17 +109,25 @@ class SearchHistoryRepository:
 
         unique_records: list[SearchHistory] = []
         seen_keywords: set[str] = set()
+        skipped_unique_count = 0
 
         for record in result.scalars():
             if record.keyword in seen_keywords:
                 continue
 
             seen_keywords.add(record.keyword)
+
+            # offset 이전의 고유 키워드는 페이지 계산을 위해 건너뜁니다.
+            if skipped_unique_count < start_offset:
+                skipped_unique_count += 1
+                continue
+
             unique_records.append(record)
-            if len(unique_records) >= max_count:
+            if len(unique_records) > max_count:
                 break
 
-        return unique_records
+        has_more = len(unique_records) > max_count
+        return unique_records[:max_count], has_more
 
     async def delete_keyword(self, user_id: str, keyword: str) -> bool:
         """
