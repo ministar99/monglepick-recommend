@@ -21,6 +21,7 @@ from app.model.schema import (
     PaginationMeta,
     RecentSearchItem,
     RecentSearchResponse,
+    SearchClickLogResponse,
 )
 from app.v2.model.dto import MovieDTO
 from app.v2.repository.movie_repository import MovieRepository
@@ -94,7 +95,23 @@ class SearchService:
             # 로그인 사용자의 검색 이력 저장
             if user_id:
                 try:
-                    await self._history_repo.add_search(user_id, keyword_cleaned)
+                    await self._history_repo.add_search(
+                        user_id=user_id,
+                        keyword=keyword_cleaned,
+                        result_count=total,
+                        filters=self._build_search_filters(
+                            search_type=search_type,
+                            genre=genre,
+                            year_from=year_from,
+                            year_to=year_to,
+                            rating_min=rating_min,
+                            rating_max=rating_max,
+                            sort_by=sort_by,
+                            sort_order=sort_order,
+                            page=page,
+                            size=size,
+                        ),
+                    )
                 except Exception as e:
                     logger.warning(f"검색 이력 저장 실패 (user_id={user_id}): {e}")
 
@@ -134,6 +151,33 @@ class SearchService:
         ]
         return RecentSearchResponse(searches=items)
 
+    async def log_search_click(
+        self,
+        user_id: str | None,
+        keyword: str,
+        clicked_movie_id: str,
+        result_count: int,
+        filters: dict | None = None,
+    ) -> SearchClickLogResponse:
+        """검색 결과 클릭 이벤트를 저장합니다."""
+        if not user_id:
+            return SearchClickLogResponse(
+                saved=False,
+                message="비로그인 사용자는 검색 클릭 이력을 저장하지 않습니다.",
+            )
+
+        await self._history_repo.add_search(
+            user_id=user_id,
+            keyword=keyword,
+            result_count=result_count,
+            filters=filters,
+            clicked_movie_id=clicked_movie_id,
+        )
+        return SearchClickLogResponse(
+            saved=True,
+            message="검색 결과 클릭 이력이 저장되었습니다.",
+        )
+
     async def get_movie_detail(self, movie_id: str) -> MovieDetailResponse:
         """영화 상세 정보를 반환합니다."""
         movie = await self._movie_repo.find_by_id(movie_id)
@@ -148,6 +192,34 @@ class SearchService:
     async def delete_all_recent(self, user_id: str) -> int:
         """사용자의 모든 최근 검색 이력을 삭제합니다."""
         return await self._history_repo.delete_all(user_id)
+
+    def _build_search_filters(
+        self,
+        *,
+        search_type: str,
+        genre: str | None,
+        year_from: int | None,
+        year_to: int | None,
+        rating_min: float | None,
+        rating_max: float | None,
+        sort_by: str,
+        sort_order: str,
+        page: int,
+        size: int,
+    ) -> dict:
+        """검색 시 적용한 조건을 직렬화 가능한 dict로 정리합니다."""
+        return {
+            "search_type": search_type,
+            "genre": genre,
+            "year_from": year_from,
+            "year_to": year_to,
+            "rating_min": rating_min,
+            "rating_max": rating_max,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "page": page,
+            "size": size,
+        }
 
     def _to_movie_brief(self, movie: MovieDTO) -> MovieBrief:
         """MovieDTO를 MovieBrief 스키마로 변환합니다."""

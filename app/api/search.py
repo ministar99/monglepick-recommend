@@ -27,6 +27,8 @@ from app.model.schema import (
     MovieDetailResponse,
     MovieSearchResponse,
     RecentSearchResponse,
+    SearchClickLogRequest,
+    SearchClickLogResponse,
     TrendingResponse,
 )
 from app.service.autocomplete_service import AutocompleteService
@@ -106,6 +108,28 @@ async def search_movies(
         page=page,
         size=size,
         user_id=user_id,
+    )
+
+
+@router.post(
+    "/click",
+    response_model=SearchClickLogResponse,
+    summary="검색 결과 클릭 로그 저장",
+    description="검색 결과 목록에서 사용자가 클릭한 영화를 저장합니다.",
+)
+async def log_search_click(
+    payload: SearchClickLogRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: str | None = Depends(get_current_user_optional),
+):
+    """검색 결과 클릭 이벤트 저장 엔드포인트"""
+    service = SearchService(db)
+    return await service.log_search_click(
+        user_id=user_id,
+        keyword=payload.keyword,
+        clicked_movie_id=payload.clicked_movie_id,
+        result_count=payload.result_count,
+        filters=payload.filters,
     )
 
 

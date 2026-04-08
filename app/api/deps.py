@@ -18,6 +18,7 @@ FastAPI 의존성 주입 모듈
 """
 
 from collections.abc import AsyncGenerator
+import logging
 
 import redis.asyncio as aioredis
 from fastapi import Depends, HTTPException, status
@@ -27,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_async_session
 from app.core.redis import get_redis
 from app.core.security import verify_token
+
+logger = logging.getLogger(__name__)
 
 # HTTP Bearer 토큰 추출기
 # auto_error=False: 토큰이 없어도 에러를 발생시키지 않음 (optional auth에 사용)
@@ -98,8 +101,12 @@ async def get_current_user_optional(
     try:
         payload = verify_token(credentials.credentials)
         return payload.user_id
-    except HTTPException:
+    except HTTPException as exc:
         # 토큰이 있지만 유효하지 않으면 None 반환 (에러 발생 안 함)
+        logger.warning(
+            "선택 인증 토큰 검증 실패: %s",
+            exc.detail,
+        )
         return None
 
 

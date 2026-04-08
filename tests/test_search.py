@@ -18,6 +18,7 @@ import json
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.model.entity import Movie, SearchHistory
@@ -314,6 +315,64 @@ async def test_recent_searches(client: AsyncClient, async_session: AsyncSession)
     keywords = [s["keyword"] for s in data["searches"]]
     assert "인터스텔라" in keywords
     assert "기생충" in keywords
+
+
+@pytest.mark.asyncio
+async def test_recent_searches_deduplicate_same_keyword(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """같은 키워드를 여러 번 검색해도 최근 검색어는 한 번만 노출됩니다."""
+    await _insert_test_movies(async_session)
+
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
+
+    response = await client.get("/api/v1/search/recent")
+    assert response.status_code == 200
+
+    data = response.json()
+    keywords = [s["keyword"] for s in data["searches"]]
+    assert keywords.count("인터스텔라") == 1
+
+    result = await async_session.execute(
+        select(SearchHistory).where(SearchHistory.keyword == "인터스텔라")
+    )
+    records = list(result.scalars())
+    assert len(records) == 2
+
+
+@pytest.mark.asyncio
+async def test_log_search_click_inserts_per_click(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """검색 결과 클릭은 클릭 횟수만큼 개별 row를 저장합니다."""
+    await _insert_test_movies(async_session)
+
+    payload = {
+        "keyword": "인터스텔라",
+        "clicked_movie_id": "100",
+        "result_count": 1,
+        "filters": {"search_type": "title", "genre": None, "sort": "relevance"},
+    }
+
+    for _ in range(3):
+        response = await client.post("/api/v1/search/click", json=payload)
+        assert response.status_code == 200
+        assert response.json()["saved"] is True
+
+    result = await async_session.execute(
+        select(SearchHistory).where(
+            SearchHistory.keyword == "인터스텔라",
+            SearchHistory.clicked_movie_id == "100",
+        )
+    )
+    records = list(result.scalars())
+
+    assert len(records) == 3
+    assert all(record.result_count == 1 for record in records)
+    assert all(record.filters["search_type"] == "title" for record in records)
 
 
 @pytest.mark.asyncio
