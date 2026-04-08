@@ -12,6 +12,7 @@ test
 """
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -130,6 +131,23 @@ class RecentSearchItem(BaseModel):
 class RecentSearchResponse(BaseModel):
     """사용자의 최근 검색어 목록 응답 (최대 20건)"""
     searches: list[RecentSearchItem] = Field(description="최근 검색어 목록")
+
+
+class SearchClickLogRequest(BaseModel):
+    """검색 결과 클릭 로그 저장 요청"""
+    keyword: str = Field(min_length=1, max_length=200, description="검색 키워드")
+    clicked_movie_id: str = Field(min_length=1, max_length=50, description="클릭한 영화 ID")
+    result_count: int = Field(ge=0, description="검색 결과 수")
+    filters: dict[str, Any] | None = Field(
+        default=None,
+        description="검색 시 적용한 필터 정보",
+    )
+
+
+class SearchClickLogResponse(BaseModel):
+    """검색 결과 클릭 로그 저장 응답"""
+    saved: bool = Field(description="저장 여부")
+    message: str = Field(description="처리 결과 메시지")
 
 
 # =========================================

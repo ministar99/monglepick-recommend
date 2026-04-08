@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.model.entity import Movie
 from app.model.schema import (
     MovieBrief,
+    SearchClickLogResponse,
     MovieDetailResponse,
     MovieSearchResponse,
     PaginationMeta,
@@ -74,7 +75,7 @@ class SearchService:
         영화를 검색하고 필터링된 결과를 반환합니다.
 
         검색과 동시에 다음 부수 작업을 수행합니다:
-        - 로그인 사용자: 검색 이력 저장 (최근 검색어)
+        - 로그인 사용자: 검색 이력 저장
         - 인기 검색어 점수 증가 (Redis Sorted Set)
         - 인기 검색어 MySQL 백업 (TrendingKeyword)
 
@@ -125,7 +126,23 @@ class SearchService:
             # 로그인 사용자의 검색 이력 저장
             if user_id:
                 try:
-                    await self._history_repo.add_search(user_id, keyword_cleaned)
+                    await self._history_repo.add_search(
+                        user_id=user_id,
+                        keyword=keyword_cleaned,
+                        result_count=total,
+                        filters=self._build_search_filters(
+                            search_type=search_type,
+                            genre=genre,
+                            year_from=year_from,
+                            year_to=year_to,
+                            rating_min=rating_min,
+                            rating_max=rating_max,
+                            sort_by=sort_by,
+                            sort_order=sort_order,
+                            page=page,
+                            size=size,
+                        ),
+                    )
                 except Exception as e:
                     # 검색 이력 저장 실패가 검색 자체를 방해하면 안 됨
                     logger.warning(f"검색 이력 저장 실패 (user_id={user_id}): {e}")
@@ -176,6 +193,33 @@ class SearchService:
         ]
         return RecentSearchResponse(searches=items)
 
+    async def log_search_click(
+        self,
+        user_id: str | None,
+        keyword: str,
+        clicked_movie_id: str,
+        result_count: int,
+        filters: dict | None = None,
+    ) -> SearchClickLogResponse:
+        """검색 결과 클릭 이벤트를 저장합니다."""
+        if not user_id:
+            return SearchClickLogResponse(
+                saved=False,
+                message="비로그인 사용자는 검색 클릭 이력을 저장하지 않습니다.",
+            )
+
+        await self._history_repo.add_search(
+            user_id=user_id,
+            keyword=keyword,
+            result_count=result_count,
+            filters=filters,
+            clicked_movie_id=clicked_movie_id,
+        )
+        return SearchClickLogResponse(
+            saved=True,
+            message="검색 결과 클릭 이력이 저장되었습니다.",
+        )
+
     async def get_movie_detail(self, movie_id: str) -> MovieDetailResponse:
         """
         영화 상세 정보를 반환합니다.
@@ -218,6 +262,34 @@ class SearchService:
             삭제된 항목 수
         """
         return await self._history_repo.delete_all(user_id)
+
+    def _build_search_filters(
+        self,
+        *,
+        search_type: str,
+        genre: str | None,
+        year_from: int | None,
+        year_to: int | None,
+        rating_min: float | None,
+        rating_max: float | None,
+        sort_by: str,
+        sort_order: str,
+        page: int,
+        size: int,
+    ) -> dict:
+        """검색 시 적용한 조건을 직렬화 가능한 dict로 정리합니다."""
+        return {
+            "search_type": search_type,
+            "genre": genre,
+            "year_from": year_from,
+            "year_to": year_to,
+            "rating_min": rating_min,
+            "rating_max": rating_max,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "page": page,
+            "size": size,
+        }
 
     def _to_movie_brief(self, movie: Movie) -> MovieBrief:
         """

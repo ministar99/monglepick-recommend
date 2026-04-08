@@ -14,7 +14,7 @@ import json
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 
 class MovieDTO(BaseModel):
@@ -129,10 +129,16 @@ class SearchHistoryDTO(BaseModel):
 
     search_history 테이블의 DictCursor 결과를 매핑합니다.
     """
-    id: int
+    search_history_id: int | str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("search_history_id", "id"),
+    )
     user_id: str
     keyword: str
     searched_at: datetime
+    result_count: Optional[int] = None
+    clicked_movie_id: Optional[str] = None
+    filters: Any = None
 
     class Config:
         from_attributes = True
