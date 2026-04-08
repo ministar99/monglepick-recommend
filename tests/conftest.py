@@ -13,6 +13,14 @@ SQLite 인메모리 DB와 FakeRedis를 사용하여
 DDL 기준: user_id VARCHAR(50) PK, movie_id VARCHAR(50) PK
 """
 
+# 2026-04-08 — `from __future__ import annotations` 추가:
+# FakeRedis 클래스 본문에 `async def set(...)` 메서드가 정의된 직후
+# `async def smembers(...) -> set[str]:` 어노테이션이 평가되면, Python 은
+# 클래스 namespace 의 `set`(메서드) 를 먼저 찾아 `set[str]` 을 그 메서드의
+# `__getitem__` 호출로 해석한다 → `TypeError: 'function' object is not subscriptable`.
+# 모든 어노테이션을 lazy(string) 평가로 바꿔 builtins.set 이 정상적으로 사용되도록 한다.
+from __future__ import annotations
+
 import asyncio
 import json
 from collections.abc import AsyncGenerator
