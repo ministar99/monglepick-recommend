@@ -51,10 +51,21 @@ from app.api.deps import get_db, get_redis_client, get_current_user, get_current
 # StaticPool: 모든 커넥션이 동일한 인메모리 DB를 공유
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
+
+# 2026-04-08 — JSON 직렬화 시 한글 escape 방지.
+# 기본 SQLAlchemy json_serializer 는 json.dumps(...)(ensure_ascii=True)를 사용하여
+# 한글이 \uXXXX 로 저장된다. 이 경우 search 테스트의 LIKE '%"로맨스"%' / '%봉준호%'
+# 패턴이 SQLite 텍스트와 매칭되지 않아 검색 결과가 0건이 된다(test_search 2건 fail).
+# ensure_ascii=False 로 직렬화하여 한글을 그대로 저장 → LIKE 매칭 정상화.
+def _json_serializer_unicode(obj):
+    return json.dumps(obj, ensure_ascii=False)
+
+
 test_engine = create_async_engine(
     TEST_DATABASE_URL,
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
+    json_serializer=_json_serializer_unicode,
 )
 
 TestSessionFactory = async_sessionmaker(
