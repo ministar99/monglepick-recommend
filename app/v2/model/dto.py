@@ -153,6 +153,45 @@ class TrendingKeywordDTO(BaseModel):
         from_attributes = True
 
 
+class LikeDTO(BaseModel):
+    """
+    영화 좋아요 DTO (Raw SQL 결과 매핑).
+
+    likes 테이블의 DictCursor 결과를 매핑한다.
+    Backend JPA 엔티티(monglepick-backend Like.java)와 1:1 대응되며,
+    DDL은 Backend가 마스터(ddl-auto=update)이므로 이 DTO는 읽기/쓰기용이지만
+    스키마 변경 권한은 없다.
+
+    <h3>소프트 삭제 정책</h3>
+    - deleted_at IS NULL → 활성 좋아요
+    - deleted_at IS NOT NULL → 취소된 좋아요 (복구 가능)
+
+    <h3>BaseAuditEntity 공통 컬럼</h3>
+    created_at, updated_at, created_by, updated_by는 Backend JPA가 자동 관리하지만
+    Raw SQL에서 INSERT 시 명시해 주거나 DB default를 활용해야 한다.
+    """
+    # 좋아요 레코드 PK (BIGINT AUTO_INCREMENT)
+    like_id: int
+    # 사용자 ID (VARCHAR 50)
+    user_id: str
+    # 영화 ID (VARCHAR 50)
+    movie_id: str
+    # 소프트 삭제 시각 (null이면 활성)
+    deleted_at: Optional[datetime] = None
+    # BaseAuditEntity 자동 컬럼
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+    def is_active(self) -> bool:
+        """활성 좋아요 여부 판정 (deleted_at IS NULL)."""
+        return self.deleted_at is None
+
+
 class WorldcupResultDTO(BaseModel):
     """
     이상형 월드컵 결과 DTO

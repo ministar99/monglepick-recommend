@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = Field(...)
 
     # -----------------------------------------
+    # SQL 로깅 (개발/디버깅용)
+    # -----------------------------------------
+    # True 로 설정하면 v1(SQLAlchemy)과 v2(aiomysql Raw SQL) 양쪽 모두
+    # 실행된 쿼리를 logger 로 출력한다.
+    # - v1: SQLAlchemy echo=True 와 동일 (sqlalchemy.engine 로거 INFO 레벨)
+    # - v2: aiomysql DictCursor/Cursor 를 LoggingDictCursor/LoggingCursor 로 교체
+    # 운영에서는 반드시 False 유지 (성능 및 민감정보 로그 누출 방지)
+    SQL_ECHO: bool = Field(default=False)
+
+    # -----------------------------------------
     # MySQL 설정 (Spring Boot 백엔드와 공유)
     # -----------------------------------------
     DB_HOST: str = Field(...)
@@ -110,6 +120,19 @@ class Settings(BaseSettings):
     WORLDCUP_ROUNDS: list[int] = [16, 32]
     # 최소 선택 장르 수
     MIN_GENRE_SELECTION: int = 3
+
+    # -----------------------------------------
+    # 영화 좋아요 (write-behind 캐시) 설정
+    # 2026-04-07 신규: Backend monglepick-backend에서 recommend로 이관
+    # Redis dirty 큐를 주기적으로 드레인하여 MySQL에 배치 반영한다.
+    # -----------------------------------------
+    # dirty 큐 flush 주기 (초). 짧을수록 데이터 손실 위험이 줄지만 DB 부하 증가.
+    # 기본값 60초 = 최악의 경우 1분치 토글이 Redis 장애 시 손실 가능.
+    LIKE_FLUSH_INTERVAL_SECONDS: int = 60
+    # flush 스케줄러 활성화 여부 (테스트 환경에서는 False로 두어 무한 루프 방지)
+    LIKE_FLUSH_ENABLED: bool = True
+    # 한 번의 flush 배치에서 최대 처리 가능한 dirty 엔트리 수 (과도한 한 배치 방지)
+    LIKE_FLUSH_BATCH_MAX: int = 1000
 
     model_config = SettingsConfigDict(
         env_file=".env",

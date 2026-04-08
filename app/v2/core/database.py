@@ -20,6 +20,10 @@ from typing import Optional
 import aiomysql
 
 from app.config import get_settings
+from app.v2.core.sql_logger import (
+    LoggingDictCursor,
+    install_sql_logging,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,18 @@ async def init_pool() -> None:
         return
 
     settings = get_settings()
+
+    # ── SQL 로깅 활성화 (SQL_ECHO=true 일 때만) ──
+    # install_sql_logging() 은 aiomysql.DictCursor / aiomysql.Cursor 모듈
+    # 속성을 LoggingDictCursor / LoggingCursor 로 교체하므로, 풀 생성 및
+    # 레포지토리의 명시적 `cursor(aiomysql.DictCursor)` 호출 모두에 적용된다.
+    # 반드시 create_pool() 호출 전에 수행해야 기본 cursorclass 도 로깅 버전으로 잡힌다.
+    if settings.SQL_ECHO:
+        install_sql_logging()
+        default_cursor_cls: type = LoggingDictCursor
+    else:
+        default_cursor_cls = aiomysql.DictCursor
+
     _pool = await aiomysql.create_pool(
         host=settings.DB_HOST,
         port=int(settings.DB_PORT),
@@ -54,10 +70,13 @@ async def init_pool() -> None:
         maxsize=20,          # 최대 커넥션 수 (HikariCP parity)
         pool_recycle=1800,   # 30분마다 커넥션 재생성 (MySQL wait_timeout 대응)
         autocommit=False,    # 수동 커밋 (트랜잭션 제어)
-        # DictCursor를 기본으로 사용하여 결과를 딕셔너리로 반환
-        cursorclass=aiomysql.DictCursor,
+        # DictCursor(또는 SQL_ECHO 활성 시 LoggingDictCursor)를 기본 cursor 로 사용
+        cursorclass=default_cursor_cls,
     )
-    logger.info("[v2] aiomysql 커넥션 풀 초기화 완료 (maxsize=20)")
+    logger.info(
+        "[v2] aiomysql 커넥션 풀 초기화 완료 (maxsize=20, sql_echo=%s)",
+        settings.SQL_ECHO,
+    )
 
 
 async def get_pool() -> aiomysql.Pool:
