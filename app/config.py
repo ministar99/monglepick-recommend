@@ -112,6 +112,8 @@ class Settings(BaseSettings):
     TRENDING_TOP_K: int = 10
     # 최근 검색어 최대 보관 개수
     RECENT_SEARCH_MAX: int = 10
+    # 장르 탐색 검색 최소 평점 참여 인원 수
+    GENRE_DISCOVERY_MIN_VOTE_COUNT: int = 100
 
     # -----------------------------------------
     # 온보딩 설정

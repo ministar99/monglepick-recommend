@@ -26,11 +26,14 @@ from app.model.schema import (
     AutocompleteResponse,
     MovieDetailResponse,
     MovieSearchResponse,
+    SearchGenreOption,
+    SearchGenreOptionsResponse,
     RecentSearchResponse,
     SearchClickLogRequest,
     SearchClickLogResponse,
     TrendingResponse,
 )
+from app.search_genre_catalog import get_search_genre_options, normalize_search_genre_labels
 from app.service.autocomplete_service import AutocompleteService
 from app.service.search_service import SearchService
 from app.service.trending_service import TrendingService
@@ -41,6 +44,30 @@ logger = logging.getLogger(__name__)
 # 라우터 정의
 # ─────────────────────────────────────────
 router = APIRouter(prefix="/search", tags=["영화 검색"])
+
+
+@router.get(
+    "/genres",
+    response_model=SearchGenreOptionsResponse,
+    summary="검색용 장르 목록",
+    description="검색 페이지의 다중 장르 선택 UI에서 사용할 장르 목록을 반환합니다.",
+)
+async def get_search_genres():
+    """
+    검색용 장르 목록 엔드포인트
+
+    첨부된 장르 마스터 기준으로 정제한 검색 전용 장르 목록을 반환합니다.
+    """
+    return SearchGenreOptionsResponse(
+        genres=[
+            SearchGenreOption(
+                label=entry.label,
+                aliases=list(entry.aliases),
+                contents_count=entry.contents_count,
+            )
+            for entry in get_search_genre_options()
+        ]
+    )
 
 
 @router.get(
@@ -63,6 +90,10 @@ async def search_movies(
     ),
     # 장르 필터
     genre: str | None = Query(default=None, description="장르 필터 (예: 액션)"),
+    genres: str | None = Query(
+        default=None,
+        description="장르 다중 선택 검색용 라벨 목록 (쉼표 구분, 예: 액션,드라마)",
+    ),
     # 연도 범위
     year_from: int | None = Query(default=None, description="시작 연도 (포함)", ge=1900, le=2030),
     year_to: int | None = Query(default=None, description="끝 연도 (포함)", ge=1900, le=2030),
@@ -94,11 +125,15 @@ async def search_movies(
     비로그인 사용자도 검색 가능하며, 로그인 시 검색 이력이 자동 저장됩니다.
     검색 시 인기 검색어 점수도 자동으로 증가합니다.
     """
+    normalized_genres = normalize_search_genre_labels(
+        [item for item in (genres or "").split(",") if item.strip()]
+    )
     service = SearchService(db, redis)
     return await service.search_movies(
         keyword=q,
         search_type=search_type,
         genre=genre,
+        genres=normalized_genres,
         year_from=year_from,
         year_to=year_to,
         rating_min=rating_min,

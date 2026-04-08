@@ -41,10 +41,12 @@ class MovieRepository:
         keyword: str | None = None,
         search_type: str = "title",
         genre: str | None = None,
+        genres: list[str] | None = None,
         year_from: int | None = None,
         year_to: int | None = None,
         rating_min: float | None = None,
         rating_max: float | None = None,
+        vote_count_min: int | None = None,
         sort_by: str = "rating",
         sort_order: str = "desc",
         page: int = 1,
@@ -57,10 +59,12 @@ class MovieRepository:
             keyword: 검색 키워드 (제목/감독/배우)
             search_type: 검색 대상 ("title", "director", "actor", "all")
             genre: 장르 필터 (예: "액션")
+            genres: 다중 장르 검색용 장르 목록 (OR 조건)
             year_from: 개봉 연도 시작 (포함)
             year_to: 개봉 연도 끝 (포함)
             rating_min: 최소 평점 (포함)
             rating_max: 최대 평점 (포함)
+            vote_count_min: 최소 평점 참여 인원 수 (포함)
             sort_by: 정렬 기준 ("rating", "release_year", "title")
             sort_order: 정렬 방향 ("asc", "desc")
             page: 페이지 번호 (1부터 시작)
@@ -125,6 +129,19 @@ class MovieRepository:
             count_query = count_query.where(genre_condition)
 
         # ─────────────────────────────────────
+        # 다중 장르 필터 (선택 장르 중 하나 이상 포함)
+        # ─────────────────────────────────────
+        if genres:
+            genre_conditions = [
+                self._json_array_contains(Movie.genres, genre_name)
+                for genre_name in dict.fromkeys(genres)
+            ]
+            if genre_conditions:
+                multi_genre_condition = or_(*genre_conditions)
+                query = query.where(multi_genre_condition)
+                count_query = count_query.where(multi_genre_condition)
+
+        # ─────────────────────────────────────
         # 연도 필터 (release_year INT 컬럼 직접 비교)
         # ─────────────────────────────────────
         if year_from is not None:
@@ -145,6 +162,13 @@ class MovieRepository:
         if rating_max is not None:
             query = query.where(Movie.rating <= rating_max)
             count_query = count_query.where(Movie.rating <= rating_max)
+
+        # ─────────────────────────────────────
+        # 평점 참여 인원 수 필터
+        # ─────────────────────────────────────
+        if vote_count_min is not None:
+            query = query.where(Movie.vote_count >= vote_count_min)
+            count_query = count_query.where(Movie.vote_count >= vote_count_min)
 
         # ─────────────────────────────────────
         # 정렬 적용
