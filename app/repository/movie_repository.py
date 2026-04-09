@@ -14,10 +14,17 @@ DDL 기준: movie_id VARCHAR(50) PK, release_year INT, genres JSON
 - director 컬럼 직접 검색: DDL에 director VARCHAR(200) 존재
 """
 
-from sqlalchemy import Select, String, cast, func, or_, select
+from sqlalchemy import Select, String, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.model.entity import Movie
+
+# 검색 결과에서는 성인물/청소년관람불가 콘텐츠를 공통 제외합니다.
+EXCLUDED_SEARCH_CERTIFICATIONS = (
+    "청소년 관람 불가",
+    "19세관람가(청소년관람불가)",
+)
+EXCLUDED_SEARCH_GENRES = ("에로",)
 
 
 class MovieRepository:
@@ -42,6 +49,7 @@ class MovieRepository:
         search_type: str = "title",
         genre: str | None = None,
         genres: list[str] | None = None,
+        genre_match_groups: list[list[str]] | None = None,
         year_from: int | None = None,
         year_to: int | None = None,
         rating_min: float | None = None,
@@ -60,12 +68,13 @@ class MovieRepository:
             search_type: 검색 대상 ("title", "director", "actor", "all")
             genre: 장르 필터 (예: "액션")
             genres: 다중 장르 검색용 장르 목록 (OR 조건)
+            genre_match_groups: 선택 장르별 alias 그룹 목록 (매칭 개수 우선 정렬용)
             year_from: 개봉 연도 시작 (포함)
             year_to: 개봉 연도 끝 (포함)
             rating_min: 최소 평점 (포함)
             rating_max: 최대 평점 (포함)
             vote_count_min: 최소 평점 참여 인원 수 (포함)
-            sort_by: 정렬 기준 ("rating", "release_year", "title")
+            sort_by: 정렬 기준 ("relevance", "rating", "release_year", "title")
             sort_order: 정렬 방향 ("asc", "desc")
             page: 페이지 번호 (1부터 시작)
             size: 페이지당 항목 수
@@ -76,6 +85,11 @@ class MovieRepository:
         # 기본 쿼리 구성 (PK: movie_id VARCHAR(50))
         query = select(Movie)
         count_query = select(func.count(Movie.movie_id))
+        # 검색 결과 공통 노출 정책을 먼저 적용해 이후 모든 검색 경로에 일관되게 반영합니다.
+        visibility_conditions = self._build_search_visibility_conditions()
+        for visibility_condition in visibility_conditions:
+            query = query.where(visibility_condition)
+            count_query = count_query.where(visibility_condition)
 
         # ─────────────────────────────────────
         # 키워드 검색 필터 적용
@@ -173,7 +187,16 @@ class MovieRepository:
         # ─────────────────────────────────────
         # 정렬 적용
         # ─────────────────────────────────────
-        query = self._apply_sort(query, sort_by, sort_order)
+        if genre_match_groups:
+            # 장르 탐색 검색은 "선택 장르를 많이 만족한 영화"를 먼저 보여줍니다.
+            query = self._apply_genre_match_priority(
+                query=query,
+                genre_match_groups=genre_match_groups,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
+        else:
+            query = self._apply_sort(query, sort_by, sort_order)
 
         # ─────────────────────────────────────
         # 페이지네이션 적용
@@ -410,7 +433,7 @@ class MovieRepository:
 
         Args:
             query: 기존 쿼리
-            sort_by: 정렬 기준 ("rating", "release_year", "title")
+            sort_by: 정렬 기준 ("relevance", "rating", "release_year", "title")
             sort_order: 정렬 방향 ("asc", "desc")
 
         Returns:
@@ -418,6 +441,7 @@ class MovieRepository:
         """
         # 정렬 컬럼 매핑 (DDL 기준: release_year INT)
         sort_column_map = {
+            "relevance": Movie.rating,  # 현재는 별도 relevance score가 없어 평점을 보조 지표로 사용
             "rating": Movie.rating,
             "release_year": Movie.release_year,
             "release_date": Movie.release_year,  # 하위 호환: release_date → release_year
@@ -429,6 +453,51 @@ class MovieRepository:
             return query.order_by(*self._nulls_last_order(column, descending=False))
         else:
             return query.order_by(*self._nulls_last_order(column, descending=True))
+
+    def _apply_genre_match_priority(
+        self,
+        query: Select,
+        genre_match_groups: list[list[str]],
+        sort_by: str,
+        sort_order: str,
+    ) -> Select:
+        """
+        선택 장르 매칭 개수 우선 정렬을 적용합니다.
+
+        예를 들어 사용자가 장르 3개를 골랐다면:
+        1. 3개 모두 포함된 영화
+        2. 2개 포함된 영화
+        3. 1개 포함된 영화
+        순서로 먼저 정렬하고, 같은 구간 안에서는 기존 정렬 기준을 유지합니다.
+        """
+        match_score_terms = []
+
+        for alias_group in genre_match_groups:
+            unique_aliases = [alias for alias in dict.fromkeys(alias_group) if alias]
+            if not unique_aliases:
+                continue
+
+            alias_conditions = [
+                self._json_array_contains(Movie.genres, alias)
+                for alias in unique_aliases
+            ]
+            matched_group_condition = (
+                alias_conditions[0]
+                if len(alias_conditions) == 1
+                else or_(*alias_conditions)
+            )
+            match_score_terms.append(case((matched_group_condition, 1), else_=0))
+
+        if not match_score_terms:
+            return self._apply_sort(query, sort_by, sort_order)
+
+        # 선택 장르별로 최대 1점만 더해 실제 선택 장르 충족 개수를 계산합니다.
+        match_score = match_score_terms[0]
+        for term in match_score_terms[1:]:
+            match_score = match_score + term
+
+        prioritized_query = query.order_by(match_score.desc())
+        return self._apply_sort(prioritized_query, sort_by, sort_order)
 
     def _json_text_like(self, column, pattern: str):
         """JSON/배열 컬럼을 문자열로 캐스팅해 LIKE 검색 조건을 생성합니다."""
@@ -443,6 +512,26 @@ class MovieRepository:
         if self._dialect_name == "mysql":
             return func.json_contains(column, func.json_quote(value)) == 1
         return self._json_text_like(column, f'%"{value}"%')
+
+    def _build_search_visibility_conditions(self) -> tuple:
+        """
+        검색 결과 공통 노출 정책 조건을 반환합니다.
+
+        - 청소년 관람 불가 인증 영화 제외
+        - 에로 장르 영화 제외
+        """
+        certification_visible_condition = or_(
+            Movie.certification.is_(None),
+            ~Movie.certification.in_(EXCLUDED_SEARCH_CERTIFICATIONS),
+        )
+        genre_visible_condition = or_(
+            Movie.genres.is_(None),
+            ~self._json_array_contains(Movie.genres, EXCLUDED_SEARCH_GENRES[0]),
+        )
+        return (
+            certification_visible_condition,
+            genre_visible_condition,
+        )
 
     def _nulls_last_order(self, column, *, descending: bool):
         """

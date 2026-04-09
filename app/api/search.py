@@ -102,9 +102,9 @@ async def search_movies(
     rating_max: float | None = Query(default=None, description="최대 평점 (포함)", ge=0.0, le=10.0),
     # 정렬
     sort_by: str = Query(
-        default="rating",
-        description="정렬 기준 ('rating', 'release_date', 'title')",
-        pattern="^(rating|release_date|title)$",
+        default="relevance",
+        description="정렬 기준 ('relevance', 'rating', 'release_date', 'title')",
+        pattern="^(relevance|rating|release_date|title)$",
     ),
     sort_order: str = Query(
         default="desc",
