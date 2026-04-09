@@ -371,6 +371,8 @@ class SearchService:
             genres=genres,
             release_year=movie.release_year,
             rating=movie.rating,
+            # H4NN4N PR #28 장르 탐색 응답이 vote_count 필드를 요구하므로 포함한다.
+            vote_count=movie.vote_count,
             poster_url=poster_url,
             trailer_url=movie.trailer_url,
             overview=movie.overview,
