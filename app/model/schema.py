@@ -12,6 +12,7 @@ test
 """
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,6 +34,10 @@ class MovieBrief(BaseModel):
     genres: list[str] = Field(default_factory=list, description="장르 목록")
     release_year: int | None = Field(default=None, description="개봉 연도")
     rating: float | None = Field(default=None, description="평균 평점 (0.0~10.0)")
+    # 장르 탐색(vote_count>=100) 필터링 및 클라이언트에서 평점 참여 수 표시에 사용.
+    # H4NN4N PR #28 테스트(test_search_movies_by_selected_genres_without_keyword)가
+    # 응답의 vote_count 필드를 참조하므로 MovieBrief에도 노출한다.
+    vote_count: int | None = Field(default=None, description="평점 참여 인원 수")
     poster_url: str | None = Field(default=None, description="포스터 이미지 전체 URL")
     trailer_url: str | None = Field(default=None, description="예고편 URL")
     overview: str | None = Field(default=None, description="줄거리 요약")
@@ -121,15 +126,57 @@ class TrendingResponse(BaseModel):
     keywords: list[TrendingKeywordItem] = Field(description="인기 검색어 목록")
 
 
+class SearchGenreOption(BaseModel):
+    """검색 페이지 장르 선택 옵션"""
+    label: str = Field(description="사용자에게 노출할 장르 라벨")
+    aliases: list[str] = Field(description="movies.genres JSON 매칭에 사용할 실제 장르명 목록")
+    contents_count: int = Field(description="병합/정제 이후 장르별 컨텐츠 수")
+
+
+class SearchGenreOptionsResponse(BaseModel):
+    """검색 페이지 장르 옵션 목록 응답"""
+    genres: list[SearchGenreOption] = Field(description="검색용 장르 옵션 목록")
+
+
 class RecentSearchItem(BaseModel):
     """최근 검색어 개별 항목"""
     keyword: str = Field(description="검색 키워드")
     searched_at: datetime = Field(description="검색 시각")
+    filters: dict[str, Any] | None = Field(default=None, description="검색 시 적용한 필터 정보")
+
+
+class RecentSearchPagination(BaseModel):
+    """최근 검색어 페이지네이션 메타 정보"""
+    offset: int = Field(default=0, description="현재 조회 시작 위치")
+    limit: int = Field(default=30, description="현재 페이지 크기")
+    has_more: bool = Field(default=False, description="다음 페이지 존재 여부")
+    next_offset: int | None = Field(default=None, description="다음 조회 시작 위치")
 
 
 class RecentSearchResponse(BaseModel):
-    """사용자의 최근 검색어 목록 응답 (최대 20건)"""
+    """사용자의 최근 검색어 목록 응답 (중복 제거 후 페이지당 최대 30건)"""
     searches: list[RecentSearchItem] = Field(description="최근 검색어 목록")
+    pagination: RecentSearchPagination = Field(
+        default_factory=RecentSearchPagination,
+        description="최근 검색어 페이지네이션 정보",
+    )
+
+
+class SearchClickLogRequest(BaseModel):
+    """검색 결과 클릭 로그 저장 요청"""
+    keyword: str = Field(min_length=1, max_length=200, description="검색 키워드")
+    clicked_movie_id: str = Field(min_length=1, max_length=50, description="클릭한 영화 ID")
+    result_count: int = Field(ge=0, description="검색 결과 수")
+    filters: dict[str, Any] | None = Field(
+        default=None,
+        description="검색 시 적용한 필터 정보",
+    )
+
+
+class SearchClickLogResponse(BaseModel):
+    """검색 결과 클릭 로그 저장 응답"""
+    saved: bool = Field(description="저장 여부")
+    message: str = Field(description="처리 결과 메시지")
 
 
 # =========================================

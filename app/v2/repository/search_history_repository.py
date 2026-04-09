@@ -2,12 +2,10 @@
 검색 이력 리포지토리 (v2 Raw SQL)
 
 v1(SQLAlchemy ORM)의 SearchHistoryRepository를 Raw SQL로 재구현합니다.
-search_history 테이블에 대한 CRUD를 담당합니다.
-
-동일 키워드 재검색 시 타임스탬프만 갱신하며,
-최대 보관 건수(20건)를 초과하면 가장 오래된 항목을 삭제합니다.
+검색 요청과 검색 결과 클릭 이벤트를 search_history 테이블에 저장합니다.
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -30,63 +28,50 @@ class SearchHistoryRepository:
         self._conn = conn
         self._settings = get_settings()
 
-    async def add_search(self, user_id: str, keyword: str) -> SearchHistoryDTO:
+    async def add_search(
+        self,
+        user_id: str,
+        keyword: str,
+        result_count: int,
+        filters: dict | None = None,
+        clicked_movie_id: str | None = None,
+    ) -> SearchHistoryDTO:
         """
-        검색 이력을 추가하거나 기존 키워드의 타임스탬프를 갱신합니다.
-
-        동일 키워드가 이미 존재하면 searched_at만 현재 시각으로 갱신하고,
-        새 키워드이면 INSERT합니다. 최대 보관 건수를 초과하면 오래된 것을 삭제합니다.
+        검색 이력 이벤트를 새 레코드로 추가합니다.
 
         Args:
             user_id: 사용자 ID
             keyword: 검색 키워드 (공백 제거 후 저장)
+            result_count: 검색 결과 수
+            filters: 검색 시 적용한 필터 정보
+            clicked_movie_id: 검색 결과에서 클릭한 영화 ID
 
         Returns:
-            저장/갱신된 SearchHistoryDTO
+            저장된 SearchHistoryDTO
         """
         keyword_cleaned = keyword.strip()
         now = datetime.now(timezone.utc)
+        filters_json = json.dumps(filters, ensure_ascii=False) if filters is not None else None
 
-        # 기존 동일 키워드 검색
-        select_sql = (
-            "SELECT * FROM search_history "
-            "WHERE user_id = %s AND keyword = %s"
+        insert_sql = (
+            "INSERT INTO search_history "
+            "(user_id, keyword, searched_at, result_count, clicked_movie_id, filters) "
+            "VALUES (%s, %s, %s, %s, %s, %s)"
         )
-        async with self._conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(select_sql, (user_id, keyword_cleaned))
-            existing = await cur.fetchone()
-
-        if existing:
-            # 기존 키워드: 타임스탬프만 갱신
-            update_sql = (
-                "UPDATE search_history SET searched_at = %s "
-                "WHERE id = %s"
+        async with self._conn.cursor() as cur:
+            await cur.execute(
+                insert_sql,
+                (user_id, keyword_cleaned, now, result_count, clicked_movie_id, filters_json),
             )
-            async with self._conn.cursor() as cur:
-                await cur.execute(update_sql, (now, existing["id"]))
 
-            # 갱신된 레코드 반환
-            existing["searched_at"] = now
-            return SearchHistoryDTO(**existing)
-        else:
-            # 새 키워드: INSERT
-            insert_sql = (
-                "INSERT INTO search_history (user_id, keyword, searched_at) "
-                "VALUES (%s, %s, %s)"
-            )
-            async with self._conn.cursor() as cur:
-                await cur.execute(insert_sql, (user_id, keyword_cleaned, now))
-                new_id = cur.lastrowid
-
-            # 최대 보관 건수 초과 시 오래된 항목 삭제
-            await self._trim_old_records(user_id)
-
-            return SearchHistoryDTO(
-                id=new_id,
-                user_id=user_id,
-                keyword=keyword_cleaned,
-                searched_at=now,
-            )
+        return SearchHistoryDTO(
+            user_id=user_id,
+            keyword=keyword_cleaned,
+            searched_at=now,
+            result_count=result_count,
+            clicked_movie_id=clicked_movie_id,
+            filters=filters,
+        )
 
     async def get_recent(
         self, user_id: str, limit: int | None = None
@@ -105,14 +90,26 @@ class SearchHistoryRepository:
         sql = (
             "SELECT * FROM search_history "
             "WHERE user_id = %s "
-            "ORDER BY searched_at DESC "
-            "LIMIT %s"
+            "ORDER BY searched_at DESC"
         )
         async with self._conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(sql, (user_id, max_count))
+            await cur.execute(sql, (user_id,))
             rows = await cur.fetchall()
 
-        return [SearchHistoryDTO(**row) for row in rows]
+        unique_rows: list[SearchHistoryDTO] = []
+        seen_keywords: set[str] = set()
+
+        for row in rows:
+            keyword = row["keyword"]
+            if keyword in seen_keywords:
+                continue
+
+            seen_keywords.add(keyword)
+            unique_rows.append(SearchHistoryDTO(**row))
+            if len(unique_rows) >= max_count:
+                break
+
+        return unique_rows
 
     async def delete_keyword(self, user_id: str, keyword: str) -> bool:
         """
@@ -147,49 +144,3 @@ class SearchHistoryRepository:
         async with self._conn.cursor() as cur:
             await cur.execute(sql, (user_id,))
             return cur.rowcount
-
-    async def _trim_old_records(self, user_id: str) -> None:
-        """
-        보관 건수를 초과하는 오래된 검색 이력을 삭제합니다.
-
-        최대 보관 건수(RECENT_SEARCH_MAX, 기본 20)를 초과하면
-        가장 오래된 항목부터 삭제합니다.
-
-        Args:
-            user_id: 사용자 ID
-        """
-        max_count = self._settings.RECENT_SEARCH_MAX
-
-        # 현재 보유 건수 확인
-        count_sql = (
-            "SELECT COUNT(*) AS total FROM search_history "
-            "WHERE user_id = %s"
-        )
-        async with self._conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(count_sql, (user_id,))
-            count_row = await cur.fetchone()
-
-        total = count_row["total"] if count_row else 0
-        if total <= max_count:
-            return
-
-        # 초과분의 가장 오래된 항목 ID 조회
-        excess_count = total - max_count
-        oldest_sql = (
-            "SELECT id FROM search_history "
-            "WHERE user_id = %s "
-            "ORDER BY searched_at ASC "
-            "LIMIT %s"
-        )
-        async with self._conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(oldest_sql, (user_id, excess_count))
-            oldest_rows = await cur.fetchall()
-
-        oldest_ids = [row["id"] for row in oldest_rows]
-
-        # 오래된 항목 삭제
-        if oldest_ids:
-            placeholders = ", ".join(["%s"] * len(oldest_ids))
-            delete_sql = f"DELETE FROM search_history WHERE id IN ({placeholders})"
-            async with self._conn.cursor() as cur:
-                await cur.execute(delete_sql, oldest_ids)

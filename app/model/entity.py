@@ -234,9 +234,8 @@ class SearchHistory(Base):
     """
     검색 이력 엔티티
 
-    사용자별 최근 검색어를 저장합니다.
-    최대 20건까지 보관하며, 오래된 검색어는 자동 삭제됩니다.
-    동일 키워드 재검색 시 타임스탬프만 갱신합니다.
+    검색어 입력과 결과 클릭 이벤트를 모두 저장합니다.
+    최근 검색어 화면에서는 동일 키워드를 최신 시각 기준으로 한 번만 노출합니다.
 
     DDL: init.sql의 search_history 테이블
     """
@@ -244,8 +243,6 @@ class SearchHistory(Base):
     __table_args__ = (
         # 사용자별 검색 시각 기준 내림차순 조회 최적화
         Index("idx_search_history_user_time", "user_id", "searched_at"),
-        # 동일 사용자의 동일 키워드 중복 방지
-        Index("uk_search_history_user_keyword", "user_id", "keyword", unique=True),
     )
 
     # 검색 이력 고유 식별자 (DDL: BIGINT AUTO_INCREMENT, SQLite 호환 variant)
@@ -259,6 +256,14 @@ class SearchHistory(Base):
         DateTime, nullable=False, default=func.now(), onupdate=func.now(),
         comment="검색 시각"
     )
+    # 검색 결과 개수
+    result_count: int | None = Column(Integer, nullable=True, comment="검색 결과 수")
+    # 검색 결과에서 클릭한 영화 ID
+    clicked_movie_id: str | None = Column(
+        String(50), nullable=True, comment="클릭한 영화 ID"
+    )
+    # 검색 시 적용한 필터 정보
+    filters = Column(JSON, nullable=True, comment="검색 필터 정보 JSON")
 
 
 class TrendingKeyword(Base):

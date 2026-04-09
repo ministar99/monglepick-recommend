@@ -26,9 +26,14 @@ from app.model.schema import (
     AutocompleteResponse,
     MovieDetailResponse,
     MovieSearchResponse,
+    SearchGenreOption,
+    SearchGenreOptionsResponse,
     RecentSearchResponse,
+    SearchClickLogRequest,
+    SearchClickLogResponse,
     TrendingResponse,
 )
+from app.search_genre_catalog import get_search_genre_options, normalize_search_genre_labels
 from app.service.autocomplete_service import AutocompleteService
 from app.service.search_service import SearchService
 from app.service.trending_service import TrendingService
@@ -39,6 +44,30 @@ logger = logging.getLogger(__name__)
 # 라우터 정의
 # ─────────────────────────────────────────
 router = APIRouter(prefix="/search", tags=["영화 검색"])
+
+
+@router.get(
+    "/genres",
+    response_model=SearchGenreOptionsResponse,
+    summary="검색용 장르 목록",
+    description="검색 페이지의 다중 장르 선택 UI에서 사용할 장르 목록을 반환합니다.",
+)
+async def get_search_genres():
+    """
+    검색용 장르 목록 엔드포인트
+
+    첨부된 장르 마스터 기준으로 정제한 검색 전용 장르 목록을 반환합니다.
+    """
+    return SearchGenreOptionsResponse(
+        genres=[
+            SearchGenreOption(
+                label=entry.label,
+                aliases=list(entry.aliases),
+                contents_count=entry.contents_count,
+            )
+            for entry in get_search_genre_options()
+        ]
+    )
 
 
 @router.get(
@@ -61,6 +90,10 @@ async def search_movies(
     ),
     # 장르 필터
     genre: str | None = Query(default=None, description="장르 필터 (예: 액션)"),
+    genres: str | None = Query(
+        default=None,
+        description="장르 다중 선택 검색용 라벨 목록 (쉼표 구분, 예: 액션,드라마)",
+    ),
     # 연도 범위
     year_from: int | None = Query(default=None, description="시작 연도 (포함)", ge=1900, le=2030),
     year_to: int | None = Query(default=None, description="끝 연도 (포함)", ge=1900, le=2030),
@@ -92,11 +125,15 @@ async def search_movies(
     비로그인 사용자도 검색 가능하며, 로그인 시 검색 이력이 자동 저장됩니다.
     검색 시 인기 검색어 점수도 자동으로 증가합니다.
     """
+    normalized_genres = normalize_search_genre_labels(
+        [item for item in (genres or "").split(",") if item.strip()]
+    )
     service = SearchService(db, redis)
     return await service.search_movies(
         keyword=q,
         search_type=search_type,
         genre=genre,
+        genres=normalized_genres,
         year_from=year_from,
         year_to=year_to,
         rating_min=rating_min,
@@ -106,6 +143,28 @@ async def search_movies(
         page=page,
         size=size,
         user_id=user_id,
+    )
+
+
+@router.post(
+    "/click",
+    response_model=SearchClickLogResponse,
+    summary="검색 결과 클릭 로그 저장",
+    description="검색 결과 목록에서 사용자가 클릭한 영화를 저장합니다.",
+)
+async def log_search_click(
+    payload: SearchClickLogRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: str | None = Depends(get_current_user_optional),
+):
+    """검색 결과 클릭 이벤트 저장 엔드포인트"""
+    service = SearchService(db)
+    return await service.log_search_click(
+        user_id=user_id,
+        keyword=payload.keyword,
+        clicked_movie_id=payload.clicked_movie_id,
+        result_count=payload.result_count,
+        filters=payload.filters,
     )
 
 
@@ -183,9 +242,11 @@ async def get_trending(
     "/recent",
     response_model=RecentSearchResponse,
     summary="내 최근 검색어",
-    description="로그인 사용자의 최근 검색 이력을 반환합니다. (최대 20건, 최신순)",
+    description="로그인 사용자의 최근 검색 이력을 반환합니다. (중복 제거 후 페이지당 최대 30건, 최신순)",
 )
 async def get_recent_searches(
+    offset: int = Query(default=0, description="중복 제거된 목록 기준 시작 위치", ge=0),
+    limit: int = Query(default=30, description="페이지당 조회 개수 (최대 30건)", ge=1, le=30),
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
@@ -194,9 +255,10 @@ async def get_recent_searches(
     최근 검색어 조회 엔드포인트
 
     로그인 필수. 해당 사용자의 최근 검색어를 최신순으로 반환합니다.
+    무한 스크롤 UI를 위해 offset 기반 페이지네이션을 지원합니다.
     """
     service = SearchService(db, redis)
-    return await service.get_recent_searches(user_id)
+    return await service.get_recent_searches(user_id=user_id, offset=offset, limit=limit)
 
 
 @router.delete(

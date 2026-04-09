@@ -12,6 +12,7 @@ aiomysql Connection을 요청 스코프로 주입합니다.
 """
 
 from collections.abc import AsyncGenerator
+import logging
 
 import aiomysql
 import redis.asyncio as aioredis
@@ -21,6 +22,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core.redis import get_redis
 from app.core.security import verify_token
 from app.v2.core.database import get_pool
+
+logger = logging.getLogger(__name__)
 
 # HTTP Bearer 토큰 추출기 (v1과 동일)
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -97,7 +100,11 @@ async def get_current_user_optional(
     try:
         payload = verify_token(credentials.credentials)
         return payload.user_id
-    except HTTPException:
+    except HTTPException as exc:
+        logger.warning(
+            "선택 인증 토큰 검증 실패(v2): %s",
+            exc.detail,
+        )
         return None
 
 

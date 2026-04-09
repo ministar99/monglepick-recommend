@@ -18,6 +18,7 @@ import json
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.model.entity import Movie, SearchHistory
@@ -41,6 +42,7 @@ async def _insert_test_movies(session: AsyncSession) -> list[Movie]:
             genres=["SF", "드라마"],
             release_year=2014,
             rating=8.6,
+            vote_count=150,
             poster_path="/interstellar.jpg",
             director="크리스토퍼 놀란",
             trailer_url="https://youtu.be/zSWdZVtXT7E",
@@ -53,6 +55,7 @@ async def _insert_test_movies(session: AsyncSession) -> list[Movie]:
             genres=["드라마", "스릴러"],
             release_year=2019,
             rating=8.5,
+            vote_count=120,
             poster_path="/parasite.jpg",
             director="봉준호",
         ),
@@ -64,6 +67,7 @@ async def _insert_test_movies(session: AsyncSession) -> list[Movie]:
             genres=["액션", "SF"],
             release_year=2019,
             rating=8.4,
+            vote_count=95,
             poster_path="/endgame.jpg",
             director="안소니 루소",
         ),
@@ -75,6 +79,7 @@ async def _insert_test_movies(session: AsyncSession) -> list[Movie]:
             genres=["로맨스", "뮤지컬"],
             release_year=2016,
             rating=8.0,
+            vote_count=80,
             poster_path="/lalaland.jpg",
             director="데이미언 셔젤",
         ),
@@ -115,6 +120,57 @@ async def test_search_movies_by_title(client: AsyncClient, async_session: AsyncS
     assert len(data["movies"]) == 1
     assert data["movies"][0]["title"] == "인터스텔라"
     assert data["movies"][0]["trailer_url"] == "https://youtu.be/zSWdZVtXT7E"
+
+
+@pytest.mark.asyncio
+async def test_search_genre_options_endpoint_returns_filtered_catalog(client: AsyncClient):
+    """검색용 장르 목록은 정제 규칙이 반영된 형태로 반환됩니다."""
+    response = await client.get("/api/v1/search/genres")
+    assert response.status_code == 200
+
+    data = response.json()
+    labels = [item["label"] for item in data["genres"]]
+
+    assert "공포" in labels
+    assert "모험" in labels
+    assert "청춘/하이틴" in labels
+    assert "코메디" not in labels
+    assert "에로" not in labels
+    assert all(item["contents_count"] > 20 for item in data["genres"])
+
+
+@pytest.mark.asyncio
+async def test_search_movies_by_selected_genres_without_keyword(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """장르 탐색 검색은 평점 참여 인원 수 100명 이상 영화만 평점순으로 반환합니다."""
+    await _insert_test_movies(async_session)
+
+    response = await client.get(
+        "/api/v1/search/movies",
+        params={"genres": "액션,드라마"},
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    titles = [movie["title"] for movie in data["movies"]]
+
+    assert "인터스텔라" in titles
+    assert "기생충" in titles
+    assert "어벤져스: 엔드게임" not in titles
+    assert data["pagination"]["total"] == 2
+    assert [movie["vote_count"] for movie in data["movies"]] == [150, 120]
+    assert [movie["rating"] for movie in data["movies"]] == [8.6, 8.5]
+
+    history_result = await async_session.execute(
+        select(SearchHistory).where(SearchHistory.keyword == "액션,드라마")
+    )
+    history_records = list(history_result.scalars())
+
+    assert len(history_records) == 1
+    assert history_records[0].filters["search_mode"] == "genre_discovery"
+    assert history_records[0].filters["genres"] == ["액션", "드라마"]
 
 
 @pytest.mark.asyncio
@@ -314,6 +370,201 @@ async def test_recent_searches(client: AsyncClient, async_session: AsyncSession)
     keywords = [s["keyword"] for s in data["searches"]]
     assert "인터스텔라" in keywords
     assert "기생충" in keywords
+
+
+@pytest.mark.asyncio
+async def test_recent_searches_deduplicate_same_keyword(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """같은 키워드를 여러 번 검색해도 최근 검색어는 한 번만 노출됩니다."""
+    await _insert_test_movies(async_session)
+
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
+
+    response = await client.get("/api/v1/search/recent")
+    assert response.status_code == 200
+
+    data = response.json()
+    keywords = [s["keyword"] for s in data["searches"]]
+    assert keywords.count("인터스텔라") == 1
+
+    result = await async_session.execute(
+        select(SearchHistory).where(SearchHistory.keyword == "인터스텔라")
+    )
+    records = list(result.scalars())
+    assert len(records) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_history_is_not_saved_for_pagination_requests(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """무한 스크롤용 2페이지 이후 요청은 검색 히스토리에 저장하지 않습니다."""
+    await _insert_test_movies(async_session)
+
+    extra_movies = [
+        Movie(
+            movie_id="500",
+            title="테스트 시리즈 1",
+            title_en="Test Series 1",
+            overview="페이지네이션 테스트용 영화 1",
+            genres=["드라마"],
+            release_year=2020,
+            rating=7.1,
+            poster_path="/test-series-1.jpg",
+            director="테스트 감독",
+        ),
+        Movie(
+            movie_id="600",
+            title="테스트 시리즈 2",
+            title_en="Test Series 2",
+            overview="페이지네이션 테스트용 영화 2",
+            genres=["드라마"],
+            release_year=2021,
+            rating=7.2,
+            poster_path="/test-series-2.jpg",
+            director="테스트 감독",
+        ),
+    ]
+    for movie in extra_movies:
+        async_session.add(movie)
+    await async_session.flush()
+
+    first_response = await client.get(
+        "/api/v1/search/movies",
+        params={"q": "테스트", "page": 1, "size": 1},
+    )
+    second_response = await client.get(
+        "/api/v1/search/movies",
+        params={"q": "테스트", "page": 2, "size": 1},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+
+    result = await async_session.execute(
+        select(SearchHistory).where(SearchHistory.keyword == "테스트")
+    )
+    records = list(result.scalars())
+
+    assert len(records) == 1
+    assert records[0].filters["page"] == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_searches_limit_30_with_deduplication(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """최근 검색어는 중복 제거 후 최대 30개까지만 노출됩니다."""
+    await _insert_test_movies(async_session)
+
+    for idx in range(35):
+        keyword = f"테스트키워드-{idx}"
+        await client.get("/api/v1/search/movies", params={"q": keyword})
+
+    # 가장 최신 키워드를 한 번 더 검색해도 결과 목록에는 중복 없이 1회만 노출돼야 함
+    await client.get("/api/v1/search/movies", params={"q": "테스트키워드-34"})
+
+    response = await client.get("/api/v1/search/recent")
+    assert response.status_code == 200
+
+    data = response.json()
+    searches = data["searches"]
+    keywords = [item["keyword"] for item in searches]
+
+    assert len(searches) == 30
+    assert len(set(keywords)) == 30
+    assert keywords[0] == "테스트키워드-34"
+    assert "테스트키워드-5" in keywords
+    assert "테스트키워드-4" not in keywords
+    assert data["pagination"]["offset"] == 0
+    assert data["pagination"]["limit"] == 30
+    assert data["pagination"]["has_more"] is True
+    assert data["pagination"]["next_offset"] == 30
+
+
+@pytest.mark.asyncio
+async def test_recent_searches_support_offset_pagination_without_duplicates(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """최근 검색어는 offset 기반으로 더 오래된 고유 키워드를 이어서 조회할 수 있습니다."""
+    await _insert_test_movies(async_session)
+
+    for idx in range(65):
+        keyword = f"페이지키워드-{idx}"
+        await client.get("/api/v1/search/movies", params={"q": keyword})
+
+    # 중복 검색이 있어도 페이지 간 목록에는 같은 키워드가 다시 나오지 않아야 함
+    await client.get("/api/v1/search/movies", params={"q": "페이지키워드-64"})
+    await client.get("/api/v1/search/movies", params={"q": "페이지키워드-40"})
+
+    first_response = await client.get("/api/v1/search/recent", params={"offset": 0, "limit": 30})
+    second_response = await client.get("/api/v1/search/recent", params={"offset": 30, "limit": 30})
+    third_response = await client.get("/api/v1/search/recent", params={"offset": 60, "limit": 30})
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert third_response.status_code == 200
+
+    first_data = first_response.json()
+    second_data = second_response.json()
+    third_data = third_response.json()
+
+    first_keywords = [item["keyword"] for item in first_data["searches"]]
+    second_keywords = [item["keyword"] for item in second_data["searches"]]
+    third_keywords = [item["keyword"] for item in third_data["searches"]]
+
+    assert len(first_keywords) == 30
+    assert len(second_keywords) == 30
+    assert len(third_keywords) == 5
+    assert set(first_keywords).isdisjoint(second_keywords)
+    assert set(first_keywords).isdisjoint(third_keywords)
+    assert set(second_keywords).isdisjoint(third_keywords)
+
+    assert first_data["pagination"]["has_more"] is True
+    assert first_data["pagination"]["next_offset"] == 30
+    assert second_data["pagination"]["has_more"] is True
+    assert second_data["pagination"]["next_offset"] == 60
+    assert third_data["pagination"]["has_more"] is False
+    assert third_data["pagination"]["next_offset"] is None
+
+
+@pytest.mark.asyncio
+async def test_log_search_click_inserts_per_click(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """검색 결과 클릭은 클릭 횟수만큼 개별 row를 저장합니다."""
+    await _insert_test_movies(async_session)
+
+    payload = {
+        "keyword": "인터스텔라",
+        "clicked_movie_id": "100",
+        "result_count": 1,
+        "filters": {"search_type": "title", "genre": None, "sort": "relevance"},
+    }
+
+    for _ in range(3):
+        response = await client.post("/api/v1/search/click", json=payload)
+        assert response.status_code == 200
+        assert response.json()["saved"] is True
+
+    result = await async_session.execute(
+        select(SearchHistory).where(
+            SearchHistory.keyword == "인터스텔라",
+            SearchHistory.clicked_movie_id == "100",
+        )
+    )
+    records = list(result.scalars())
+
+    assert len(records) == 3
+    assert all(record.result_count == 1 for record in records)
+    assert all(record.filters["search_type"] == "title" for record in records)
 
 
 @pytest.mark.asyncio
