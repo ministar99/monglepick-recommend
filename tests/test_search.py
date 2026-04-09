@@ -174,6 +174,209 @@ async def test_search_movies_by_selected_genres_without_keyword(
 
 
 @pytest.mark.asyncio
+async def test_search_movies_by_selected_genres_relevance_does_not_require_vote_count_threshold(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """장르 탐색 검색의 관련도순은 평점 참여 인원 수 100명 조건을 적용하지 않습니다."""
+    await _insert_test_movies(async_session)
+
+    async_session.add(
+        Movie(
+            movie_id="450",
+            title="저투표 장르 매치",
+            title_en="Low Vote Genre Match",
+            overview="장르 탐색 관련도순 테스트용 영화",
+            genres=["액션", "드라마"],
+            release_year=2024,
+            rating=7.2,
+            vote_count=10,
+            poster_path="/low-vote-genre-match.jpg",
+            director="테스트 감독 D",
+        )
+    )
+    await async_session.flush()
+
+    response = await client.get(
+        "/api/v1/search/movies",
+        params={"genres": "액션,드라마", "sort_by": "relevance"},
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    titles = [movie["title"] for movie in data["movies"]]
+
+    assert "저투표 장르 매치" in titles
+
+
+@pytest.mark.asyncio
+async def test_search_movies_by_selected_genres_release_date_does_not_require_vote_count_threshold(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """장르 탐색 검색의 최신순은 평점 참여 인원 수 100명 조건을 적용하지 않습니다."""
+    await _insert_test_movies(async_session)
+
+    async_session.add(
+        Movie(
+            movie_id="460",
+            title="최신 저투표 장르 매치",
+            title_en="Latest Low Vote Genre Match",
+            overview="장르 탐색 최신순 테스트용 영화",
+            genres=["액션", "드라마"],
+            release_year=2025,
+            rating=6.8,
+            vote_count=5,
+            poster_path="/latest-low-vote-genre-match.jpg",
+            director="테스트 감독 E",
+        )
+    )
+    await async_session.flush()
+
+    response = await client.get(
+        "/api/v1/search/movies",
+        params={"genres": "액션,드라마", "sort_by": "release_date", "sort_order": "desc"},
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    titles = [movie["title"] for movie in data["movies"]]
+
+    assert titles[0] == "최신 저투표 장르 매치"
+
+
+@pytest.mark.asyncio
+async def test_search_movies_by_selected_genres_prioritizes_match_count(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """장르 탐색 검색은 선택 장르를 더 많이 만족한 영화가 먼저 노출됩니다."""
+    await _insert_test_movies(async_session)
+
+    prioritized_movies = [
+        Movie(
+            movie_id="500",
+            title="장르 풀매치",
+            title_en="Genre Full Match",
+            overview="선택 장르를 모두 만족하는 영화",
+            genres=["액션", "드라마", "애니메이션"],
+            release_year=2024,
+            rating=7.5,
+            vote_count=220,
+            poster_path="/genre-full-match.jpg",
+            director="테스트 감독 A",
+        ),
+        Movie(
+            movie_id="600",
+            title="장르 투매치",
+            title_en="Genre Two Match",
+            overview="선택 장르 중 두 개를 만족하는 영화",
+            genres=["액션", "드라마"],
+            release_year=2023,
+            rating=9.9,
+            vote_count=240,
+            poster_path="/genre-two-match.jpg",
+            director="테스트 감독 B",
+        ),
+        Movie(
+            movie_id="700",
+            title="장르 원매치",
+            title_en="Genre One Match",
+            overview="선택 장르 중 한 개만 만족하는 영화",
+            genres=["애니메이션"],
+            release_year=2022,
+            rating=10.0,
+            vote_count=260,
+            poster_path="/genre-one-match.jpg",
+            director="테스트 감독 C",
+        ),
+    ]
+    for movie in prioritized_movies:
+        async_session.add(movie)
+    await async_session.flush()
+
+    response = await client.get(
+        "/api/v1/search/movies",
+        params={"genres": "액션,드라마,애니메이션", "size": 10},
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    titles = [movie["title"] for movie in data["movies"]]
+
+    # 선택 장르 3개 일치 > 2개 일치 > 1개 일치 순으로 우선 노출되어야 합니다.
+    assert titles[:5] == [
+        "장르 풀매치",
+        "장르 투매치",
+        "장르 원매치",
+        "인터스텔라",
+        "기생충",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_movies_excludes_adult_certification_and_ero_genre(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """검색 결과에서는 청소년관람불가/에로 영화가 공통 제외됩니다."""
+    await _insert_test_movies(async_session)
+
+    adult_movies = [
+        Movie(
+            movie_id="800",
+            title="청불 영화",
+            title_en="Adults Only Movie",
+            overview="청소년 관람 불가 테스트",
+            genres=["스릴러"],
+            release_year=2020,
+            rating=8.1,
+            vote_count=140,
+            certification="청소년 관람 불가",
+            poster_path="/adult-only.jpg",
+            director="테스트 감독 F",
+        ),
+        Movie(
+            movie_id="810",
+            title="청불 표기 영화",
+            title_en="Adults Restricted Movie",
+            overview="19세관람가 테스트",
+            genres=["드라마"],
+            release_year=2021,
+            rating=7.9,
+            vote_count=130,
+            certification="19세관람가(청소년관람불가)",
+            poster_path="/adult-restricted.jpg",
+            director="테스트 감독 G",
+        ),
+        Movie(
+            movie_id="820",
+            title="에로 영화",
+            title_en="Erotic Movie",
+            overview="에로 장르 테스트",
+            genres=["에로", "드라마"],
+            release_year=2022,
+            rating=9.0,
+            vote_count=160,
+            poster_path="/erotic-movie.jpg",
+            director="테스트 감독 H",
+        ),
+    ]
+    for movie in adult_movies:
+        async_session.add(movie)
+    await async_session.flush()
+
+    response = await client.get("/api/v1/search/movies", params={"sort_by": "relevance"})
+    assert response.status_code == 200
+
+    data = response.json()
+    titles = [movie["title"] for movie in data["movies"]]
+
+    assert "청불 영화" not in titles
+    assert "청불 표기 영화" not in titles
+    assert "에로 영화" not in titles
+
+@pytest.mark.asyncio
 async def test_search_movies_all_includes_director_and_actor(
     client: AsyncClient, async_session: AsyncSession
 ):
