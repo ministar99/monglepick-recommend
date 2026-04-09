@@ -34,6 +34,10 @@ class MovieBrief(BaseModel):
     genres: list[str] = Field(default_factory=list, description="장르 목록")
     release_year: int | None = Field(default=None, description="개봉 연도")
     rating: float | None = Field(default=None, description="평균 평점 (0.0~10.0)")
+    # 장르 탐색(vote_count>=100) 필터링 및 클라이언트에서 평점 참여 수 표시에 사용.
+    # H4NN4N PR #28 테스트(test_search_movies_by_selected_genres_without_keyword)가
+    # 응답의 vote_count 필드를 참조하므로 MovieBrief에도 노출한다.
+    vote_count: int | None = Field(default=None, description="평점 참여 인원 수")
     poster_url: str | None = Field(default=None, description="포스터 이미지 전체 URL")
     trailer_url: str | None = Field(default=None, description="예고편 URL")
     overview: str | None = Field(default=None, description="줄거리 요약")
