@@ -6,8 +6,10 @@
 정제 규칙:
 - `contents_count <= 20` 인 장르는 제외
 - `코메디`, `에로` 장르는 제외
+- `동성애`, `반공/분단`, `계몽` 장르는 숨김
 - 괄호 표기는 사용자 노출 라벨에서 제거 또는 병합
 - 유사 장르는 하나의 키워드로 묶고, 실제 검색 시에는 alias 전체를 매칭
+- `인물`, `전기` 장르는 하나의 키워드로 병합
 """
 
 from dataclasses import dataclass
@@ -50,17 +52,14 @@ SEARCH_GENRE_CATALOG: tuple[SearchGenreCatalogEntry, ...] = (
     SearchGenreCatalogEntry("자연ㆍ환경", ("자연ㆍ환경",), 472),
     SearchGenreCatalogEntry("문화", ("문화",), 911),
     SearchGenreCatalogEntry("사회", ("사회", "사회물(경향)"), 955),
-    SearchGenreCatalogEntry("인물", ("인물",), 1512),
+    SearchGenreCatalogEntry("인물/전기", ("인물", "전기"), 1607),
     SearchGenreCatalogEntry("기업ㆍ기관ㆍ단체", ("기업ㆍ기관ㆍ단체",), 142),
     SearchGenreCatalogEntry("첩보", ("첩보",), 67),
     SearchGenreCatalogEntry("TV 영화", ("TV 영화",), 31914),
     SearchGenreCatalogEntry("서부", ("서부", "서부극(웨스턴)"), 9862),
     SearchGenreCatalogEntry("옴니버스", ("옴니버스",), 61),
     SearchGenreCatalogEntry("시대극/사극", ("시대극/사극",), 329),
-    SearchGenreCatalogEntry("전기", ("전기",), 95),
-    SearchGenreCatalogEntry("반공/분단", ("반공/분단",), 127),
     SearchGenreCatalogEntry("청춘/하이틴", ("청춘영화", "하이틴(고교)"), 148),
-    SearchGenreCatalogEntry("계몽", ("계몽",), 698),
     SearchGenreCatalogEntry("문예", ("문예",), 25),
     SearchGenreCatalogEntry("종교", ("종교",), 55),
     SearchGenreCatalogEntry("교육", ("교육",), 339),
@@ -72,7 +71,6 @@ SEARCH_GENRE_CATALOG: tuple[SearchGenreCatalogEntry, ...] = (
     SearchGenreCatalogEntry("느와르", ("느와르",), 55),
     SearchGenreCatalogEntry("예술", ("예술",), 174),
     SearchGenreCatalogEntry("다부작", ("다부작",), 224),
-    SearchGenreCatalogEntry("동성애", ("동성애",), 38),
     SearchGenreCatalogEntry("TV드라마", ("TV드라마",), 91),
     SearchGenreCatalogEntry("공연", ("공연",), 305),
 )
@@ -80,6 +78,10 @@ SEARCH_GENRE_CATALOG: tuple[SearchGenreCatalogEntry, ...] = (
 _SEARCH_GENRE_LABEL_MAP = {
     entry.label: entry
     for entry in SEARCH_GENRE_CATALOG
+}
+_SEARCH_GENRE_LEGACY_LABEL_MAP = {
+    "인물": "인물/전기",
+    "전기": "인물/전기",
 }
 
 
@@ -103,6 +105,7 @@ def normalize_search_genre_labels(labels: list[str] | None) -> list[str]:
 
     for label in labels:
         cleaned = label.strip()
+        cleaned = _SEARCH_GENRE_LEGACY_LABEL_MAP.get(cleaned, cleaned)
         if not cleaned or cleaned in seen:
             continue
         if cleaned not in _SEARCH_GENRE_LABEL_MAP:

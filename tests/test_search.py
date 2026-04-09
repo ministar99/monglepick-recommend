@@ -134,8 +134,14 @@ async def test_search_genre_options_endpoint_returns_filtered_catalog(client: As
     assert "공포" in labels
     assert "모험" in labels
     assert "청춘/하이틴" in labels
+    assert "인물/전기" in labels
+    assert "인물" not in labels
+    assert "전기" not in labels
     assert "코메디" not in labels
     assert "에로" not in labels
+    assert "동성애" not in labels
+    assert "반공/분단" not in labels
+    assert "계몽" not in labels
     assert all(item["contents_count"] > 20 for item in data["genres"])
 
 

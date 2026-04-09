@@ -122,6 +122,8 @@ class SearchService:
             if is_genre_discovery_search and sort_by == "rating"
             else None
         )
+        # 관련도순/최신순은 프론트에서 재정렬하므로 DB에는 기본 검색 순서만 요청합니다.
+        db_sort_by = "relevance" if sort_by in {"relevance", "release_date"} else sort_by
 
         # ─────────────────────────────────────
         # MySQL 검색 실행
@@ -137,7 +139,7 @@ class SearchService:
             rating_min=rating_min,
             rating_max=rating_max,
             vote_count_min=genre_discovery_vote_count_min,
-            sort_by=sort_by,
+            sort_by=db_sort_by,
             sort_order=sort_order,
             page=page,
             size=size,
