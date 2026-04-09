@@ -144,12 +144,15 @@ async def test_search_movies_by_selected_genres_without_keyword(
     client: AsyncClient,
     async_session: AsyncSession,
 ):
-    """장르 탐색 검색은 평점 참여 인원 수 100명 이상 영화만 평점순으로 반환합니다."""
+    """장르 탐색 검색 + 평점순 정렬은 평점 참여 인원 수 100명 이상 영화만 평점순으로 반환합니다."""
+    # PR #29 이후 vote_count 필터는 `sort_by == "rating"` 인 경우에만 적용된다.
+    # 기본(관련도순)에서는 vote_count 미달 영화도 포함되므로 테스트 의도(평점순 +
+    # vote_count 필터)를 유지하려면 명시적으로 sort_by=rating 을 전달해야 한다.
     await _insert_test_movies(async_session)
 
     response = await client.get(
         "/api/v1/search/movies",
-        params={"genres": "액션,드라마"},
+        params={"genres": "액션,드라마", "sort_by": "rating"},
     )
     assert response.status_code == 200
 
