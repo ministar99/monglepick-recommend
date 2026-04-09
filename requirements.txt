@@ -29,3 +29,6 @@ python-dotenv>=1.0.0
 # 백그라운드 스케줄러 (좋아요 write-behind flush, 2026-04-07)
 # Redis dirty 큐를 주기적으로 드레인하여 MySQL likes 테이블에 배치 반영한다.
 apscheduler>=3.10.4
+
+# Prometheus 메트릭 노출 (/metrics) — VM3 Prometheus 스크레이프 대상
+prometheus-fastapi-instrumentator>=7.0.0
