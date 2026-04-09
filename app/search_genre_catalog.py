@@ -114,6 +114,23 @@ def normalize_search_genre_labels(labels: list[str] | None) -> list[str]:
     return normalized
 
 
+def get_search_genre_alias_groups(labels: list[str] | None) -> list[list[str]]:
+    """
+    장르 라벨 목록을 선택 장르별 alias 그룹 목록으로 반환합니다.
+
+    예: `["모험", "공포"]` ->
+    `[["모험", "어드벤처", "활극"], ["공포", "공포(호러)"]]`
+    """
+
+    alias_groups: list[list[str]] = []
+
+    for label in normalize_search_genre_labels(labels):
+        entry = _SEARCH_GENRE_LABEL_MAP[label]
+        alias_groups.append(list(entry.aliases))
+
+    return alias_groups
+
+
 def expand_search_genre_aliases(labels: list[str] | None) -> list[str]:
     """
     장르 라벨 목록을 실제 movies.genres JSON 매칭용 alias 목록으로 확장합니다.
@@ -124,9 +141,8 @@ def expand_search_genre_aliases(labels: list[str] | None) -> list[str]:
     aliases: list[str] = []
     seen: set[str] = set()
 
-    for label in normalize_search_genre_labels(labels):
-        entry = _SEARCH_GENRE_LABEL_MAP[label]
-        for alias in entry.aliases:
+    for alias_group in get_search_genre_alias_groups(labels):
+        for alias in alias_group:
             if alias in seen:
                 continue
 

@@ -37,7 +37,11 @@ from app.model.schema import (
 from app.repository.movie_repository import MovieRepository
 from app.repository.search_history_repository import SearchHistoryRepository
 from app.repository.trending_repository import TrendingRepository
-from app.search_genre_catalog import expand_search_genre_aliases, normalize_search_genre_labels
+from app.search_genre_catalog import (
+    expand_search_genre_aliases,
+    get_search_genre_alias_groups,
+    normalize_search_genre_labels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +95,7 @@ class SearchService:
             year_to: 끝 연도
             rating_min: 최소 평점
             rating_max: 최대 평점
-            sort_by: 정렬 기준 ("rating", "release_date", "title")
+            sort_by: 정렬 기준 ("relevance", "rating", "release_date", "title")
             sort_order: 정렬 방향 ("asc", "desc")
             page: 페이지 번호 (1부터)
             size: 페이지 크기
@@ -105,14 +109,18 @@ class SearchService:
         size = min(max(1, size), 100)  # 최대 100건
         keyword_cleaned = keyword.strip() if keyword and keyword.strip() else None
         selected_genres = normalize_search_genre_labels(genres)
+        # 선택 장르별 alias 그룹을 유지해야 "몇 개 장르를 만족했는지"를 정렬에 반영할 수 있습니다.
+        selected_genre_alias_groups = get_search_genre_alias_groups(selected_genres)
         expanded_genres = expand_search_genre_aliases(selected_genres)
         is_genre_discovery_search = keyword_cleaned is None and bool(selected_genres)
         search_history_keyword = (
             keyword_cleaned if keyword_cleaned is not None else ",".join(selected_genres)
         ) or None
-        # 장르 탐색 검색은 평점 신뢰도를 위해 최소 평점 참여 인원 수를 함께 적용합니다.
+        # 장르 탐색 검색의 평점순 정렬에서만 평점 신뢰도를 위해 최소 평점 참여 인원 수를 적용합니다.
         genre_discovery_vote_count_min = (
-            self._settings.GENRE_DISCOVERY_MIN_VOTE_COUNT if is_genre_discovery_search else None
+            self._settings.GENRE_DISCOVERY_MIN_VOTE_COUNT
+            if is_genre_discovery_search and sort_by == "rating"
+            else None
         )
 
         # ─────────────────────────────────────
@@ -123,6 +131,7 @@ class SearchService:
             search_type=search_type,
             genre=genre,
             genres=expanded_genres if is_genre_discovery_search else None,
+            genre_match_groups=selected_genre_alias_groups if is_genre_discovery_search else None,
             year_from=year_from,
             year_to=year_to,
             rating_min=rating_min,
