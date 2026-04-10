@@ -81,7 +81,7 @@ class MovieRepository:
                 # 통합 검색: 제목 + 감독 + 배우를 OR 조건으로 묶어 검색
                 conditions.append(
                     "(title LIKE %s OR title_en LIKE %s "
-                    "OR director LIKE %s OR CAST(cast AS CHAR) LIKE %s)"
+                    "OR director LIKE %s OR CAST(cast_members AS CHAR) LIKE %s)"
                 )
                 params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
             elif search_type == "title":
@@ -93,8 +93,8 @@ class MovieRepository:
                 conditions.append("director LIKE %s")
                 params.append(like_pattern)
             elif search_type == "actor":
-                # 배우 검색: cast JSON 컬럼에서 LIKE로 검색
-                conditions.append("cast IS NOT NULL AND CAST(cast AS CHAR) LIKE %s")
+                # 배우 검색: cast_members JSON 컬럼에서 LIKE로 검색
+                conditions.append("cast_members IS NOT NULL AND CAST(cast_members AS CHAR) LIKE %s")
                 params.append(like_pattern)
 
         # 장르 필터 (JSON_CONTAINS 사용)

@@ -92,7 +92,8 @@ class Movie(Base):
     # 감독 이름
     director: str | None = Column(String(200), nullable=True, comment="감독 이름")
     # 주연 배우 목록 (JSON 배열: ["배우1", "배우2"])
-    cast = Column(JSON, nullable=True, comment='주연 배우 목록 ["배우1","배우2"]')
+    # DB 컬럼명은 cast_members (Backend JPA Entity 기준), Python 속성명은 cast_members로 통일
+    cast_members = Column("cast_members", JSON, nullable=True, comment='주연 배우 목록 ["배우1","배우2"]')
     # 관람등급 (전체관람가, 12세 등)
     certification: str | None = Column(String(50), nullable=True, comment="관람등급")
     # YouTube 트레일러 URL
@@ -135,12 +136,12 @@ class Movie(Base):
 
     def get_cast_list(self) -> list[str]:
         """JSON 배우 목록을 파이썬 리스트로 변환합니다."""
-        if not self.cast:
+        if not self.cast_members:
             return []
-        if isinstance(self.cast, list):
-            return self.cast
+        if isinstance(self.cast_members, list):
+            return self.cast_members
         try:
-            return json.loads(self.cast)
+            return json.loads(self.cast_members)
         except (json.JSONDecodeError, TypeError):
             return []
 
