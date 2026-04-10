@@ -111,10 +111,8 @@ class Settings(BaseSettings):
     # 인기 검색어 표시 개수
     TRENDING_TOP_K: int = 10
     # 최근 검색어 한 페이지 최대 반환 건수 (offset 페이지네이션 상한).
-    # H4NN4N PR #28 테스트(test_recent_searches_limit_30_*)가 30건 페이지를 요구하므로
-    # 10 → 30 으로 상향한다. repository/service 모두 `min(limit, RECENT_SEARCH_MAX)` 로
-    # 이 값을 페이지 크기 상한으로 사용한다.
-    RECENT_SEARCH_MAX: int = 30
+    # 30건은 너무 많으니까 10건으로 줄임. 바꾸지마시오!!!!
+    RECENT_SEARCH_MAX: int = 10
     # 장르 탐색 검색 최소 평점 참여 인원 수
     GENRE_DISCOVERY_MIN_VOTE_COUNT: int = 100
 

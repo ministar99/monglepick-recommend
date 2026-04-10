@@ -240,6 +240,20 @@ async def test_search_movies_by_selected_genres_release_date_does_not_require_vo
             director="테스트 감독 E",
         )
     )
+    async_session.add(
+        Movie(
+            movie_id="461",
+            title="평점 높은 과거 장르 매치",
+            title_en="Older High Rated Genre Match",
+            overview="최신순 정렬 회귀 테스트용 영화",
+            genres=["액션", "드라마"],
+            release_year=2018,
+            rating=9.8,
+            vote_count=500,
+            poster_path="/older-high-rated-horror.jpg",
+            director="테스트 감독 F",
+        )
+    )
     await async_session.flush()
 
     response = await client.get(
@@ -251,7 +265,9 @@ async def test_search_movies_by_selected_genres_release_date_does_not_require_vo
     data = response.json()
     titles = [movie["title"] for movie in data["movies"]]
 
+    # 같은 장르 매치 조건이라면 평점이 더 높아도 과거 영화보다 최신 영화가 먼저 와야 합니다.
     assert titles[0] == "최신 저투표 장르 매치"
+    assert titles[1] == "평점 높은 과거 장르 매치"
 
 
 @pytest.mark.asyncio

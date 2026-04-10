@@ -16,6 +16,7 @@ dependencies = [
     "pyjwt>=2.12.1",
     # VM3 Prometheus 스크레이프용 /metrics 엔드포인트 미들웨어.
     "prometheus-fastapi-instrumentator>=7.0.0",
+    "pytest>=9.0.3",
     "python-dotenv>=1.2.2",
     "redis>=7.3.0",
     "sqlalchemy[asyncio]>=2.0.48",

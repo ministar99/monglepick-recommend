@@ -122,8 +122,9 @@ class SearchService:
             if is_genre_discovery_search and sort_by == "rating"
             else None
         )
-        # 관련도순/최신순은 프론트에서 재정렬하므로 DB에는 기본 검색 순서만 요청합니다.
-        db_sort_by = "relevance" if sort_by in {"relevance", "release_date"} else sort_by
+        # 관련도순은 프런트에서 기본 검색 결과를 그대로 유지하므로 DB에는 기본 검색 순서를 요청합니다.
+        # 최신순은 "검색 시작 시점의 기준 정렬"로 사용되므로 DB에서도 실제 개봉일 정렬을 타야 합니다.
+        db_sort_by = "relevance" if sort_by == "relevance" else sort_by
 
         # ─────────────────────────────────────
         # MySQL 검색 실행
@@ -144,7 +145,7 @@ class SearchService:
             page=page,
             size=size,
         )
-
+        
         # ─────────────────────────────────────
         # 부수 작업: 검색 이력 + 인기 검색어 갱신
         # ─────────────────────────────────────
