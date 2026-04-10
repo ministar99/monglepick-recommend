@@ -148,13 +148,13 @@ class RecentSearchItem(BaseModel):
 class RecentSearchPagination(BaseModel):
     """최근 검색어 페이지네이션 메타 정보"""
     offset: int = Field(default=0, description="현재 조회 시작 위치")
-    limit: int = Field(default=30, description="현재 페이지 크기")
+    limit: int = Field(default=10, description="현재 페이지 크기")
     has_more: bool = Field(default=False, description="다음 페이지 존재 여부")
     next_offset: int | None = Field(default=None, description="다음 조회 시작 위치")
 
 
 class RecentSearchResponse(BaseModel):
-    """사용자의 최근 검색어 목록 응답 (중복 제거 후 페이지당 최대 30건)"""
+    """사용자의 최근 검색어 목록 응답 (중복 제거 후 페이지당 최대 10건)"""
     searches: list[RecentSearchItem] = Field(description="최근 검색어 목록")
     pagination: RecentSearchPagination = Field(
         default_factory=RecentSearchPagination,

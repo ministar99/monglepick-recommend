@@ -134,8 +134,14 @@ async def test_search_genre_options_endpoint_returns_filtered_catalog(client: As
     assert "공포" in labels
     assert "모험" in labels
     assert "청춘/하이틴" in labels
+    assert "인물/전기" in labels
+    assert "인물" not in labels
+    assert "전기" not in labels
     assert "코메디" not in labels
     assert "에로" not in labels
+    assert "동성애" not in labels
+    assert "반공/분단" not in labels
+    assert "계몽" not in labels
     assert all(item["contents_count"] > 20 for item in data["genres"])
 
 
@@ -234,6 +240,20 @@ async def test_search_movies_by_selected_genres_release_date_does_not_require_vo
             director="테스트 감독 E",
         )
     )
+    async_session.add(
+        Movie(
+            movie_id="461",
+            title="평점 높은 과거 장르 매치",
+            title_en="Older High Rated Genre Match",
+            overview="최신순 정렬 회귀 테스트용 영화",
+            genres=["액션", "드라마"],
+            release_year=2018,
+            rating=9.8,
+            vote_count=500,
+            poster_path="/older-high-rated-horror.jpg",
+            director="테스트 감독 F",
+        )
+    )
     await async_session.flush()
 
     response = await client.get(
@@ -245,7 +265,9 @@ async def test_search_movies_by_selected_genres_release_date_does_not_require_vo
     data = response.json()
     titles = [movie["title"] for movie in data["movies"]]
 
+    # 같은 장르 매치 조건이라면 평점이 더 높아도 과거 영화보다 최신 영화가 먼저 와야 합니다.
     assert titles[0] == "최신 저투표 장르 매치"
+    assert titles[1] == "평점 높은 과거 장르 매치"
 
 
 @pytest.mark.asyncio
@@ -661,11 +683,11 @@ async def test_search_history_is_not_saved_for_pagination_requests(
 
 
 @pytest.mark.asyncio
-async def test_recent_searches_limit_30_with_deduplication(
+async def test_recent_searches_limit_10_with_deduplication(
     client: AsyncClient,
     async_session: AsyncSession,
 ):
-    """최근 검색어는 중복 제거 후 최대 30개까지만 노출됩니다."""
+    """최근 검색어는 중복 제거 후 최대 10개까지만 노출됩니다."""
     await _insert_test_movies(async_session)
 
     for idx in range(35):
@@ -682,15 +704,15 @@ async def test_recent_searches_limit_30_with_deduplication(
     searches = data["searches"]
     keywords = [item["keyword"] for item in searches]
 
-    assert len(searches) == 30
-    assert len(set(keywords)) == 30
+    assert len(searches) == 10
+    assert len(set(keywords)) == 10
     assert keywords[0] == "테스트키워드-34"
-    assert "테스트키워드-5" in keywords
-    assert "테스트키워드-4" not in keywords
+    assert "테스트키워드-25" in keywords
+    assert "테스트키워드-24" not in keywords
     assert data["pagination"]["offset"] == 0
-    assert data["pagination"]["limit"] == 30
+    assert data["pagination"]["limit"] == 10
     assert data["pagination"]["has_more"] is True
-    assert data["pagination"]["next_offset"] == 30
+    assert data["pagination"]["next_offset"] == 10
 
 
 @pytest.mark.asyncio
@@ -709,9 +731,9 @@ async def test_recent_searches_support_offset_pagination_without_duplicates(
     await client.get("/api/v1/search/movies", params={"q": "페이지키워드-64"})
     await client.get("/api/v1/search/movies", params={"q": "페이지키워드-40"})
 
-    first_response = await client.get("/api/v1/search/recent", params={"offset": 0, "limit": 30})
-    second_response = await client.get("/api/v1/search/recent", params={"offset": 30, "limit": 30})
-    third_response = await client.get("/api/v1/search/recent", params={"offset": 60, "limit": 30})
+    first_response = await client.get("/api/v1/search/recent", params={"offset": 0, "limit": 10})
+    second_response = await client.get("/api/v1/search/recent", params={"offset": 10, "limit": 10})
+    third_response = await client.get("/api/v1/search/recent", params={"offset": 20, "limit": 10})
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
@@ -725,19 +747,19 @@ async def test_recent_searches_support_offset_pagination_without_duplicates(
     second_keywords = [item["keyword"] for item in second_data["searches"]]
     third_keywords = [item["keyword"] for item in third_data["searches"]]
 
-    assert len(first_keywords) == 30
-    assert len(second_keywords) == 30
-    assert len(third_keywords) == 5
+    assert len(first_keywords) == 10
+    assert len(second_keywords) == 10
+    assert len(third_keywords) == 10
     assert set(first_keywords).isdisjoint(second_keywords)
     assert set(first_keywords).isdisjoint(third_keywords)
     assert set(second_keywords).isdisjoint(third_keywords)
 
     assert first_data["pagination"]["has_more"] is True
-    assert first_data["pagination"]["next_offset"] == 30
+    assert first_data["pagination"]["next_offset"] == 10
     assert second_data["pagination"]["has_more"] is True
-    assert second_data["pagination"]["next_offset"] == 60
-    assert third_data["pagination"]["has_more"] is False
-    assert third_data["pagination"]["next_offset"] is None
+    assert second_data["pagination"]["next_offset"] == 20
+    assert third_data["pagination"]["has_more"] is True
+    assert third_data["pagination"]["next_offset"] == 30
 
 
 @pytest.mark.asyncio
