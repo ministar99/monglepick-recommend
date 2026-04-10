@@ -223,7 +223,7 @@ class SearchService:
         Args:
             user_id: 사용자 ID
             offset: 중복 제거된 목록 기준 시작 위치
-            limit: 페이지당 반환 건수 (최대 30건)
+            limit: 페이지당 반환 건수 (최대 10건)
 
         Returns:
             RecentSearchResponse: 최근 검색어 목록 + 페이지네이션 정보

@@ -683,11 +683,11 @@ async def test_search_history_is_not_saved_for_pagination_requests(
 
 
 @pytest.mark.asyncio
-async def test_recent_searches_limit_30_with_deduplication(
+async def test_recent_searches_limit_10_with_deduplication(
     client: AsyncClient,
     async_session: AsyncSession,
 ):
-    """최근 검색어는 중복 제거 후 최대 30개까지만 노출됩니다."""
+    """최근 검색어는 중복 제거 후 최대 10개까지만 노출됩니다."""
     await _insert_test_movies(async_session)
 
     for idx in range(35):
@@ -704,15 +704,15 @@ async def test_recent_searches_limit_30_with_deduplication(
     searches = data["searches"]
     keywords = [item["keyword"] for item in searches]
 
-    assert len(searches) == 30
-    assert len(set(keywords)) == 30
+    assert len(searches) == 10
+    assert len(set(keywords)) == 10
     assert keywords[0] == "테스트키워드-34"
-    assert "테스트키워드-5" in keywords
-    assert "테스트키워드-4" not in keywords
+    assert "테스트키워드-25" in keywords
+    assert "테스트키워드-24" not in keywords
     assert data["pagination"]["offset"] == 0
-    assert data["pagination"]["limit"] == 30
+    assert data["pagination"]["limit"] == 10
     assert data["pagination"]["has_more"] is True
-    assert data["pagination"]["next_offset"] == 30
+    assert data["pagination"]["next_offset"] == 10
 
 
 @pytest.mark.asyncio
@@ -731,9 +731,9 @@ async def test_recent_searches_support_offset_pagination_without_duplicates(
     await client.get("/api/v1/search/movies", params={"q": "페이지키워드-64"})
     await client.get("/api/v1/search/movies", params={"q": "페이지키워드-40"})
 
-    first_response = await client.get("/api/v1/search/recent", params={"offset": 0, "limit": 30})
-    second_response = await client.get("/api/v1/search/recent", params={"offset": 30, "limit": 30})
-    third_response = await client.get("/api/v1/search/recent", params={"offset": 60, "limit": 30})
+    first_response = await client.get("/api/v1/search/recent", params={"offset": 0, "limit": 10})
+    second_response = await client.get("/api/v1/search/recent", params={"offset": 10, "limit": 10})
+    third_response = await client.get("/api/v1/search/recent", params={"offset": 20, "limit": 10})
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
@@ -747,19 +747,19 @@ async def test_recent_searches_support_offset_pagination_without_duplicates(
     second_keywords = [item["keyword"] for item in second_data["searches"]]
     third_keywords = [item["keyword"] for item in third_data["searches"]]
 
-    assert len(first_keywords) == 30
-    assert len(second_keywords) == 30
-    assert len(third_keywords) == 5
+    assert len(first_keywords) == 10
+    assert len(second_keywords) == 10
+    assert len(third_keywords) == 10
     assert set(first_keywords).isdisjoint(second_keywords)
     assert set(first_keywords).isdisjoint(third_keywords)
     assert set(second_keywords).isdisjoint(third_keywords)
 
     assert first_data["pagination"]["has_more"] is True
-    assert first_data["pagination"]["next_offset"] == 30
+    assert first_data["pagination"]["next_offset"] == 10
     assert second_data["pagination"]["has_more"] is True
-    assert second_data["pagination"]["next_offset"] == 60
-    assert third_data["pagination"]["has_more"] is False
-    assert third_data["pagination"]["next_offset"] is None
+    assert second_data["pagination"]["next_offset"] == 20
+    assert third_data["pagination"]["has_more"] is True
+    assert third_data["pagination"]["next_offset"] == 30
 
 
 @pytest.mark.asyncio

@@ -242,11 +242,11 @@ async def get_trending(
     "/recent",
     response_model=RecentSearchResponse,
     summary="내 최근 검색어",
-    description="로그인 사용자의 최근 검색 이력을 반환합니다. (중복 제거 후 페이지당 최대 30건, 최신순)",
+    description="로그인 사용자의 최근 검색 이력을 반환합니다. (중복 제거 후 페이지당 최대 10건, 최신순)",
 )
 async def get_recent_searches(
     offset: int = Query(default=0, description="중복 제거된 목록 기준 시작 위치", ge=0),
-    limit: int = Query(default=30, description="페이지당 조회 개수 (최대 30건)", ge=1, le=30),
+    limit: int = Query(default=10, description="페이지당 조회 개수 (최대 10건)", ge=1, le=10),
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
