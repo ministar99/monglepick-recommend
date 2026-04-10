@@ -18,6 +18,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# curl 설치 (헬스체크용)
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # 빌드 단계에서 설치한 패키지 복사
 COPY --from=builder /install /usr/local
 

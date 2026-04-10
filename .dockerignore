@@ -1,0 +1,20 @@
+# 환경변수 파일 (docker-compose environment로 주입)
+.env
+.env.*
+
+# Git/IDE
+.git
+.gitignore
+.idea
+.vscode
+
+# Python 캐시
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+
+# 가상환경
+.venv
+venv

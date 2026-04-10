@@ -106,7 +106,7 @@ class MovieRepository:
                     Movie.title.ilike(like_pattern),
                     Movie.title_en.ilike(like_pattern),
                     Movie.director.ilike(like_pattern),
-                    self._json_text_like(Movie.cast, actor_like),
+                    self._json_text_like(Movie.cast_members, actor_like),
                 )
                 query = query.where(all_condition)
                 count_query = count_query.where(all_condition)
@@ -129,10 +129,10 @@ class MovieRepository:
                 
             elif search_type == "actor":
                 # 배우 검색: cast JSON 컬럼에서 LIKE로 검색
-                query = query.where(Movie.cast.isnot(None))
-                query = query.where(self._json_text_like(Movie.cast, actor_like))
-                count_query = count_query.where(Movie.cast.isnot(None))
-                count_query = count_query.where(self._json_text_like(Movie.cast, actor_like))
+                query = query.where(Movie.cast_members.isnot(None))
+                query = query.where(self._json_text_like(Movie.cast_members, actor_like))
+                count_query = count_query.where(Movie.cast_members.isnot(None))
+                count_query = count_query.where(self._json_text_like(Movie.cast_members, actor_like))
 
         # ─────────────────────────────────────
         # 장르 필터 (JSON_CONTAINS 사용)

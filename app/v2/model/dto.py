@@ -4,7 +4,7 @@ Pydantic DTO 모델 — Raw SQL 결과(dict) → 파이썬 객체 매핑
 SQLAlchemy ORM 엔티티(v1 entity.py)를 대체합니다.
 aiomysql DictCursor가 반환하는 딕셔너리를 Pydantic 모델로 변환합니다.
 
-JSON 컬럼(genres, cast 등)은 MySQL에서 문자열로 반환되므로,
+JSON 컬럼(genres, cast_members 등)은 MySQL에서 문자열로 반환되므로,
 validator에서 json.loads()로 파싱합니다.
 
 DDL 기준: Backend JPA 엔티티 (ddl-auto=update, 진실 원본)
@@ -36,7 +36,7 @@ class MovieDTO(BaseModel):
     popularity_score: Optional[float] = None
     genres: Any = None        # JSON 컬럼 — 문자열 또는 리스트
     director: Optional[str] = None
-    cast: Any = None           # JSON 컬럼 — 문자열 또는 리스트
+    cast_members: Any = None    # JSON 컬럼 — 문자열 또는 리스트 (DB 컬럼명: cast_members)
     certification: Optional[str] = None
     trailer_url: Optional[str] = None
     overview: Optional[str] = None
@@ -79,13 +79,13 @@ class MovieDTO(BaseModel):
 
     def get_cast_list(self) -> list[str]:
         """JSON 배우 목록을 파이썬 리스트로 변환합니다."""
-        if not self.cast:
+        if not self.cast_members:
             return []
-        if isinstance(self.cast, list):
-            return self.cast
-        if isinstance(self.cast, str):
+        if isinstance(self.cast_members, list):
+            return self.cast_members
+        if isinstance(self.cast_members, str):
             try:
-                parsed = json.loads(self.cast)
+                parsed = json.loads(self.cast_members)
                 return parsed if isinstance(parsed, list) else []
             except (json.JSONDecodeError, TypeError):
                 return []
