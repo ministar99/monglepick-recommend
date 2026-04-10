@@ -417,9 +417,9 @@ async def test_search_movies_all_includes_director_and_actor(
     director_data = director_response.json()
     assert any(movie["title"] == "기생충" for movie in director_data["movies"])
 
-    # 배우 이름으로 all 검색 (cast JSON LIKE 경로)
+    # 배우 이름으로 all 검색 (cast_members JSON LIKE 경로)
     movie = await async_session.get(Movie, "100")
-    movie.cast = ["매튜 맥커너히", "앤 해서웨이"]
+    movie.cast_members = ["매튜 맥커너히", "앤 해서웨이"]
     await async_session.flush()
 
     actor_response = await client.get(
