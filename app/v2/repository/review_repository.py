@@ -16,6 +16,10 @@ import aiomysql
 class ReviewRepository:
     """리뷰 MySQL 리포지토리."""
 
+    # SQL Injection 방지: _get_columns() 에 전달 가능한 테이블명 화이트리스트.
+    # 이 집합에 없는 테이블명이 인자로 들어오면 즉시 ValueError 를 발생시킨다.
+    _ALLOWED_TABLES: frozenset[str] = frozenset({"reviews", "review_likes"})
+
     def __init__(self, conn: aiomysql.Connection):
         self._conn = conn
         self._columns_cache: dict[str, set[str]] = {}
@@ -26,7 +30,15 @@ class ReviewRepository:
 
         로컬 DB는 구버전(init.sql) 스키마를 쓰고 있을 수 있어
         reviews.id/content 와 최신 review_id/contents 를 모두 지원해야 한다.
+
+        SQL Injection 방지를 위해 table_name 을 _ALLOWED_TABLES 로 검증한다.
+        허용 목록에 없는 테이블명이 전달되면 ValueError 를 발생시킨다.
         """
+        # 허용 목록 검증 — SHOW COLUMNS 는 파라미터 바인딩을 지원하지 않아
+        # f-string 으로 테이블명을 삽입하기 전 반드시 allowlist 를 통과해야 한다.
+        if table_name not in self._ALLOWED_TABLES:
+            raise ValueError(f"허용되지 않은 테이블: {table_name}")
+
         if table_name in self._columns_cache:
             return self._columns_cache[table_name]
 
@@ -358,12 +370,42 @@ class ReviewRepository:
         return await self.find_by_id(review_id)
 
     async def delete(self, review_id: int) -> bool:
-        """리뷰를 하드 삭제한다."""
+        """
+        리뷰를 삭제한다.
+
+        is_deleted 컬럼이 존재하는 경우: 소프트 삭제 (UPDATE SET is_deleted = 1).
+        is_deleted 컬럼이 없는 경우: 하드 삭제 (DELETE FROM reviews).
+          - 하드 삭제 시 FK 제약 또는 고아 행 방지를 위해
+            review_likes 행을 먼저 삭제한 뒤 reviews 행을 삭제한다.
+        """
         review_columns = await self._get_columns("reviews")
         review_id_column = "review_id" if "review_id" in review_columns else "id"
-        async with self._conn.cursor() as cur:
-            await cur.execute(f"DELETE FROM reviews WHERE {review_id_column} = %s", (review_id,))
-            return cur.rowcount > 0
+
+        if "is_deleted" in review_columns:
+            # 소프트 삭제: 행을 유지한 채 is_deleted 플래그만 세운다.
+            # list/count 쿼리에서 COALESCE(is_deleted, 0) = 0 필터로 자동 제외된다.
+            sql = (
+                "UPDATE reviews "
+                f"SET is_deleted = 1 "
+                f"WHERE {review_id_column} = %s"
+            )
+            async with self._conn.cursor() as cur:
+                await cur.execute(sql, (review_id,))
+                return cur.rowcount > 0
+        else:
+            # 하드 삭제: review_likes 를 먼저 제거하여 고아 행을 방지한다.
+            async with self._conn.cursor() as cur:
+                # 1단계: 해당 리뷰의 좋아요 행 전체 삭제
+                await cur.execute(
+                    "DELETE FROM review_likes WHERE review_id = %s",
+                    (review_id,),
+                )
+                # 2단계: 리뷰 본체 삭제
+                await cur.execute(
+                    f"DELETE FROM reviews WHERE {review_id_column} = %s",
+                    (review_id,),
+                )
+                return cur.rowcount > 0
 
     async def has_review_like(self, review_id: int, user_id: str) -> bool:
         """사용자의 리뷰 좋아요 여부를 조회한다."""
@@ -379,15 +421,43 @@ class ReviewRepository:
         return row is not None
 
     async def insert_review_like(self, review_id: int, user_id: str) -> None:
-        """리뷰 좋아요를 추가한다."""
+        """
+        리뷰 좋아요를 추가한다.
+
+        review_likes 테이블의 실제 컬럼을 런타임에 확인하여
+        created_at / updated_at / created_by / updated_by 가 존재하는 경우에만
+        INSERT 컬럼에 포함한다. create() 의 동적 컬럼 패턴을 동일하게 적용한다.
+        """
         now = datetime.now(timezone.utc)
+        # review_likes 테이블의 실제 컬럼 목록 확인 (캐시 활용)
+        like_columns = await self._get_columns("review_likes")
+
+        # 필수 컬럼: review_id, user_id
+        insert_columns: list[str] = ["review_id", "user_id"]
+        values: list[object] = [review_id, user_id]
+
+        # BaseAuditEntity 컬럼이 존재하는 경우에만 포함 (구버전 스키마 호환)
+        if "created_at" in like_columns:
+            insert_columns.append("created_at")
+            values.append(now)
+        if "updated_at" in like_columns:
+            insert_columns.append("updated_at")
+            values.append(now)
+        if "created_by" in like_columns:
+            insert_columns.append("created_by")
+            values.append(user_id)
+        if "updated_by" in like_columns:
+            insert_columns.append("updated_by")
+            values.append(user_id)
+
+        placeholders = ", ".join(["%s"] * len(insert_columns))
         sql = (
             "INSERT INTO review_likes "
-            "(review_id, user_id, created_at, updated_at, created_by, updated_by) "
-            "VALUES (%s, %s, %s, %s, %s, %s)"
+            f"({', '.join(insert_columns)}) "
+            f"VALUES ({placeholders})"
         )
         async with self._conn.cursor() as cur:
-            await cur.execute(sql, (review_id, user_id, now, now, user_id, user_id))
+            await cur.execute(sql, tuple(values))
 
     async def delete_review_like(self, review_id: int, user_id: str) -> bool:
         """리뷰 좋아요를 취소한다."""

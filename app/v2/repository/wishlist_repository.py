@@ -16,6 +16,10 @@ import aiomysql
 class WishlistRepository:
     """위시리스트 MySQL 리포지토리."""
 
+    # SQL Injection 방지: _get_columns() 에 전달 가능한 테이블명 화이트리스트.
+    # 이 집합에 없는 테이블명이 인자로 들어오면 즉시 ValueError 를 발생시킨다.
+    _ALLOWED_TABLES: frozenset[str] = frozenset({"user_wishlist"})
+
     def __init__(self, conn: aiomysql.Connection):
         self._conn = conn
         self._columns_cache: dict[str, set[str]] = {}
@@ -26,7 +30,15 @@ class WishlistRepository:
 
         로컬 DB가 구버전 스키마(id/content)일 수도 있고,
         최신 운영 스키마(wishlist_id/contents)일 수도 있어 런타임에 실제 컬럼을 확인한다.
+
+        SQL Injection 방지를 위해 table_name 을 _ALLOWED_TABLES 로 검증한다.
+        허용 목록에 없는 테이블명이 전달되면 ValueError 를 발생시킨다.
         """
+        # 허용 목록 검증 — SHOW COLUMNS 는 파라미터 바인딩을 지원하지 않아
+        # f-string 으로 테이블명을 삽입하기 전 반드시 allowlist 를 통과해야 한다.
+        if table_name not in self._ALLOWED_TABLES:
+            raise ValueError(f"허용되지 않은 테이블: {table_name}")
+
         if table_name in self._columns_cache:
             return self._columns_cache[table_name]
 
