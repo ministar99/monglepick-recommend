@@ -42,42 +42,23 @@ class TrendingRepository:
         """
         keyword_cleaned = keyword.strip()
         now = datetime.now(timezone.utc)
-
-        # 기존 키워드 조회
+        upsert_sql = (
+            "INSERT INTO trending_keywords (keyword, search_count, last_searched_at) "
+            "VALUES (%s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE "
+            "search_count = search_count + 1, "
+            "last_searched_at = VALUES(last_searched_at)"
+        )
         select_sql = "SELECT * FROM trending_keywords WHERE keyword = %s"
+
+        async with self._conn.cursor() as cur:
+            await cur.execute(upsert_sql, (keyword_cleaned, 1, now))
+
         async with self._conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(select_sql, (keyword_cleaned,))
-            existing = await cur.fetchone()
+            row = await cur.fetchone()
 
-        if existing:
-            # 기존 키워드: 검색 횟수 +1, 마지막 검색 시각 갱신
-            update_sql = (
-                "UPDATE trending_keywords "
-                "SET search_count = search_count + 1, last_searched_at = %s "
-                "WHERE id = %s"
-            )
-            async with self._conn.cursor() as cur:
-                await cur.execute(update_sql, (now, existing["id"]))
-
-            existing["search_count"] += 1
-            existing["last_searched_at"] = now
-            return TrendingKeywordDTO(**existing)
-        else:
-            # 새 키워드: 생성
-            insert_sql = (
-                "INSERT INTO trending_keywords (keyword, search_count, last_searched_at) "
-                "VALUES (%s, %s, %s)"
-            )
-            async with self._conn.cursor() as cur:
-                await cur.execute(insert_sql, (keyword_cleaned, 1, now))
-                new_id = cur.lastrowid
-
-            return TrendingKeywordDTO(
-                id=new_id,
-                keyword=keyword_cleaned,
-                search_count=1,
-                last_searched_at=now,
-            )
+        return TrendingKeywordDTO(**row)
 
     async def get_top_keywords(self, limit: int = 10) -> list[TrendingKeywordDTO]:
         """
