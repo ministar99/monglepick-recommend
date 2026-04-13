@@ -14,14 +14,18 @@ SQLite 인메모리 DB + FakeRedis를 사용하여 외부 의존성 없이 테�
 """
 
 import json
+from datetime import date
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.model.entity import Movie, SearchHistory
+from app.repository.trending_repository import TrendingRepository
+from app.service.search_service import SearchService
 
 
 # ─────────────────────────────────────────
@@ -575,6 +579,67 @@ async def test_trending_after_search(client: AsyncClient, async_session: AsyncSe
     # "인터스텔라"가 1위여야 함
     assert keywords[0]["keyword"] == "인터스텔라"
     assert keywords[0]["search_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_trending_increment_failure_does_not_poison_outer_transaction(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """인기 검색어 백업이 실패해도 같은 트랜잭션의 다른 변경사항은 커밋 가능해야 합니다."""
+    async_session.add(
+        SearchHistory(
+            user_id="test-user",
+            keyword="인터스텔라",
+            result_count=1,
+            filters={"search_type": "title"},
+        )
+    )
+    await async_session.flush()
+
+    repo = TrendingRepository(async_session)
+    original_execute = async_session.execute
+    failed_once = False
+
+    async def flaky_execute(statement, *args, **kwargs):
+        nonlocal failed_once
+        statement_sql = str(statement)
+        if not failed_once and "INSERT INTO trending_keywords" in statement_sql:
+            failed_once = True
+            raise IntegrityError(statement_sql, {}, Exception("duplicate entry"))
+        return await original_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(async_session, "execute", flaky_execute)
+
+    with pytest.raises(IntegrityError):
+        await repo.increment("아이언맨")
+
+    await async_session.commit()
+
+    result = await async_session.execute(
+        select(SearchHistory).where(SearchHistory.user_id == "test-user")
+    )
+    histories = list(result.scalars())
+    assert len(histories) == 1
+    assert histories[0].keyword == "인터스텔라"
+
+
+@pytest.mark.asyncio
+async def test_movie_detail_normalizes_date_typed_kobis_open_dt(async_session: AsyncSession):
+    """상세 응답은 date 타입의 kobis_open_dt도 안전하게 문자열로 정규화합니다."""
+    service = SearchService(async_session)
+    movie = Movie(
+        movie_id="711",
+        title="테스트 영화",
+        title_en="Test Movie",
+        release_year=2026,
+        kobis_open_dt=date(2026, 4, 13),
+    )
+
+    detail = service._to_movie_detail(movie)
+
+    assert detail.kobis_open_dt == "20260413"
+    assert detail.release_date == "2026-04-13"
 
 
 # =========================================
