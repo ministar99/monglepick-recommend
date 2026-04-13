@@ -148,13 +148,13 @@ class RecentSearchItem(BaseModel):
 class RecentSearchPagination(BaseModel):
     """최근 검색어 페이지네이션 메타 정보"""
     offset: int = Field(default=0, description="현재 조회 시작 위치")
-    limit: int = Field(default=30, description="현재 페이지 크기")
+    limit: int = Field(default=10, description="현재 페이지 크기")
     has_more: bool = Field(default=False, description="다음 페이지 존재 여부")
     next_offset: int | None = Field(default=None, description="다음 조회 시작 위치")
 
 
 class RecentSearchResponse(BaseModel):
-    """사용자의 최근 검색어 목록 응답 (중복 제거 후 페이지당 최대 30건)"""
+    """사용자의 최근 검색어 목록 응답 (중복 제거 후 페이지당 최대 10건)"""
     searches: list[RecentSearchItem] = Field(description="최근 검색어 목록")
     pagination: RecentSearchPagination = Field(
         default_factory=RecentSearchPagination,
@@ -358,6 +358,85 @@ class LikeResponse(BaseModel):
         ge=0,
         serialization_alias="likeCount",
     )
+
+
+# =========================================
+# 위시리스트 / 리뷰 관련 스키마 (Recommend v2 이관)
+# =========================================
+
+class WishlistStatusResponse(BaseModel):
+    """현재 영화의 위시리스트 포함 여부 응답"""
+    wishlisted: bool = Field(description="현재 사용자의 위시리스트 포함 여부")
+
+
+class WishlistToggleResponse(BaseModel):
+    """위시리스트 추가/삭제 결과 응답"""
+    wishlisted: bool = Field(description="처리 후 위시리스트 포함 여부")
+
+
+class WishlistItem(BaseModel):
+    """위시리스트 개별 항목"""
+    wishlist_id: int = Field(description="위시리스트 항목 ID")
+    movie_id: str = Field(description="영화 ID")
+    created_at: datetime = Field(description="위시리스트 추가 시각")
+    movie: MovieBrief = Field(description="위시리스트에 담긴 영화 정보")
+
+
+class WishlistListResponse(BaseModel):
+    """위시리스트 목록 응답"""
+    wishlist: list[WishlistItem] = Field(description="위시리스트 항목 목록")
+    total: int = Field(description="전체 위시리스트 개수")
+
+
+class ReviewAuthor(BaseModel):
+    """리뷰 작성자 표시 정보"""
+    nickname: str = Field(description="작성자 닉네임")
+
+
+class ReviewItem(BaseModel):
+    """영화 리뷰 개별 항목"""
+    id: int = Field(description="리뷰 ID")
+    movie_id: str = Field(description="영화 ID")
+    movie_title: str | None = Field(default=None, description="리뷰 대상 영화 제목")
+    poster_url: str | None = Field(default=None, description="리뷰 대상 영화 포스터 URL")
+    rating: float = Field(description="평점")
+    content: str | None = Field(default=None, description="리뷰 본문")
+    author: ReviewAuthor = Field(description="작성자 정보")
+    is_spoiler: bool = Field(default=False, description="스포일러 포함 여부")
+    is_mine: bool = Field(default=False, description="현재 로그인 사용자의 리뷰 여부")
+    review_source: str | None = Field(default=None, description="리뷰 작성 출처")
+    review_category_code: str | None = Field(default=None, description="리뷰 카테고리 코드")
+    created_at: datetime = Field(description="리뷰 작성 시각")
+    like_count: int = Field(default=0, description="리뷰 좋아요 수")
+
+
+class ReviewListResponse(BaseModel):
+    """영화별 리뷰 목록 응답"""
+    reviews: list[ReviewItem] = Field(description="리뷰 목록")
+    total: int = Field(description="전체 리뷰 수")
+
+
+class UserReviewListResponse(BaseModel):
+    """마이페이지용 내 리뷰 목록 응답"""
+    reviews: list[ReviewItem] = Field(description="내가 작성한 리뷰 목록")
+    pagination: PaginationMeta = Field(description="페이지네이션 정보")
+
+
+class ReviewCreateRequest(BaseModel):
+    """리뷰 작성 요청"""
+    movie_id: str | None = Field(default=None, description="리뷰 대상 영화 ID (호환용)")
+    rating: float = Field(description="평점", ge=0.5, le=5.0)
+    content: str | None = Field(default=None, description="리뷰 본문")
+    is_spoiler: bool = Field(default=False, description="스포일러 포함 여부")
+    review_source: str | None = Field(default=None, description="리뷰 작성 출처")
+    review_category_code: str | None = Field(default=None, description="리뷰 카테고리 코드")
+
+
+class ReviewUpdateRequest(BaseModel):
+    """리뷰 수정 요청"""
+    rating: float = Field(description="평점", ge=0.5, le=5.0)
+    content: str | None = Field(default=None, description="리뷰 본문")
+    is_spoiler: bool = Field(default=False, description="스포일러 포함 여부")
 
 
 class OnboardingStatusResponse(BaseModel):

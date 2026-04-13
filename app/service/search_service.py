@@ -122,6 +122,9 @@ class SearchService:
             if is_genre_discovery_search and sort_by == "rating"
             else None
         )
+        # 관련도순은 프런트에서 기본 검색 결과를 그대로 유지하므로 DB에는 기본 검색 순서를 요청합니다.
+        # 최신순은 "검색 시작 시점의 기준 정렬"로 사용되므로 DB에서도 실제 개봉일 정렬을 타야 합니다.
+        db_sort_by = "relevance" if sort_by == "relevance" else sort_by
 
         # ─────────────────────────────────────
         # MySQL 검색 실행
@@ -137,12 +140,12 @@ class SearchService:
             rating_min=rating_min,
             rating_max=rating_max,
             vote_count_min=genre_discovery_vote_count_min,
-            sort_by=sort_by,
+            sort_by=db_sort_by,
             sort_order=sort_order,
             page=page,
             size=size,
         )
-
+        
         # ─────────────────────────────────────
         # 부수 작업: 검색 이력 + 인기 검색어 갱신
         # ─────────────────────────────────────
@@ -220,7 +223,7 @@ class SearchService:
         Args:
             user_id: 사용자 ID
             offset: 중복 제거된 목록 기준 시작 위치
-            limit: 페이지당 반환 건수 (최대 30건)
+            limit: 페이지당 반환 건수 (최대 10건)
 
         Returns:
             RecentSearchResponse: 최근 검색어 목록 + 페이지네이션 정보
