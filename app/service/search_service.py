@@ -17,6 +17,7 @@ REQ_034: 검색 결과 상세 필터링 (장르, 연도, 평점, 국가, 정렬)
 
 import json
 import logging
+from datetime import date, datetime
 from math import ceil
 
 import redis.asyncio as aioredis
@@ -408,10 +409,11 @@ class SearchService:
         if movie.backdrop_path:
             backdrop_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{movie.backdrop_path}"
 
+        kobis_open_dt = self._normalize_kobis_open_dt(movie.kobis_open_dt)
         release_date = None
-        if movie.kobis_open_dt and len(movie.kobis_open_dt) == 8 and movie.kobis_open_dt.isdigit():
+        if kobis_open_dt and len(kobis_open_dt) == 8 and kobis_open_dt.isdigit():
             release_date = (
-                f"{movie.kobis_open_dt[:4]}-{movie.kobis_open_dt[4:6]}-{movie.kobis_open_dt[6:8]}"
+                f"{kobis_open_dt[:4]}-{kobis_open_dt[4:6]}-{kobis_open_dt[6:8]}"
             )
         elif movie.release_year:
             release_date = f"{movie.release_year}-01-01"
@@ -438,8 +440,21 @@ class SearchService:
             imdb_id=movie.imdb_id,
             original_language=movie.original_language,
             collection_name=movie.collection_name,
-            kobis_open_dt=movie.kobis_open_dt,
+            kobis_open_dt=kobis_open_dt,
             awards=movie.awards,
             filming_location=movie.filming_location,
             source=movie.source,
         )
+
+    @staticmethod
+    def _normalize_kobis_open_dt(value: object) -> str | None:
+        """KOBIS 개봉일 값을 YYYYMMDD 문자열로 정규화합니다."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().strftime("%Y%m%d")
+        if isinstance(value, date):
+            return value.strftime("%Y%m%d")
+        if isinstance(value, str):
+            return value.strip() or None
+        return str(value)
