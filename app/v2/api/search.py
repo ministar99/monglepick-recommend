@@ -23,6 +23,7 @@ from app.model.schema import (
     SearchClickLogResponse,
     TrendingResponse,
 )
+from app.search_genre_catalog import normalize_search_genre_labels
 from app.v2.service.autocomplete_service import AutocompleteService
 from app.v2.service.search_service import SearchService
 from app.v2.service.trending_service import TrendingService
@@ -55,6 +56,10 @@ async def search_movies(
     ),
     # 장르 필터
     genre: str | None = Query(default=None, description="장르 필터 (예: 액션)"),
+    genres: str | None = Query(
+        default=None,
+        description="장르 다중 선택 검색용 라벨 목록 (쉼표 구분, 예: 액션,드라마)",
+    ),
     # 연도 범위
     year_from: int | None = Query(default=None, description="시작 연도 (포함)", ge=1900, le=2030),
     year_to: int | None = Query(default=None, description="끝 연도 (포함)", ge=1900, le=2030),
@@ -63,9 +68,9 @@ async def search_movies(
     rating_max: float | None = Query(default=None, description="최대 평점 (포함)", ge=0.0, le=10.0),
     # 정렬
     sort_by: str = Query(
-        default="rating",
-        description="정렬 기준 ('rating', 'release_date', 'title')",
-        pattern="^(rating|release_date|title)$",
+        default="relevance",
+        description="정렬 기준 ('relevance', 'rating', 'release_date', 'title')",
+        pattern="^(relevance|rating|release_date|title)$",
     ),
     sort_order: str = Query(
         default="desc",
@@ -85,11 +90,15 @@ async def search_movies(
 
     비로그인 사용자도 검색 가능하며, 로그인 시 검색 이력이 자동 저장됩니다.
     """
+    normalized_genres = normalize_search_genre_labels(
+        [item for item in (genres or "").split(",") if item.strip()]
+    )
     service = SearchService(conn, redis)
     return await service.search_movies(
         keyword=q,
         search_type=search_type,
         genre=genre,
+        genres=normalized_genres,
         year_from=year_from,
         year_to=year_to,
         rating_min=rating_min,
@@ -184,13 +193,14 @@ async def get_trending(
     description="로그인 사용자의 최근 검색 이력을 반환합니다. (최대 20건, 최신순)",
 )
 async def get_recent_searches(
+    offset: int = Query(default=0, description="중복 제거된 목록 기준 시작 위치", ge=0),
+    limit: int = Query(default=10, description="페이지당 조회 개수 (최대 10건)", ge=1, le=10),
     conn: aiomysql.Connection = Depends(get_conn),
-    redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
 ):
     """최근 검색어 조회 엔드포인트 (로그인 필수)"""
-    service = SearchService(conn, redis)
-    return await service.get_recent_searches(user_id)
+    service = SearchService(conn)
+    return await service.get_recent_searches(user_id, offset=offset, limit=limit)
 
 
 @router.delete(
@@ -200,11 +210,10 @@ async def get_recent_searches(
 )
 async def delete_all_recent(
     conn: aiomysql.Connection = Depends(get_conn),
-    redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
 ):
     """최근 검색어 전체 삭제 엔드포인트 (로그인 필수)"""
-    service = SearchService(conn, redis)
+    service = SearchService(conn)
     deleted_count = await service.delete_all_recent(user_id)
     return {"message": f"{deleted_count}건의 검색 이력이 삭제되었습니다."}
 
@@ -217,11 +226,10 @@ async def delete_all_recent(
 async def delete_recent_keyword(
     keyword: str,
     conn: aiomysql.Connection = Depends(get_conn),
-    redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
 ):
     """최근 검색어 개별 삭제 엔드포인트 (로그인 필수)"""
-    service = SearchService(conn, redis)
+    service = SearchService(conn)
     success = await service.delete_recent_keyword(user_id, keyword)
     if not success:
         raise HTTPException(

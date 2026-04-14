@@ -106,6 +106,8 @@ class Movie(Base):
     imdb_id: str | None = Column(String(20), nullable=True, comment="IMDb ID")
     # 원본 언어 코드 (en, ko 등)
     original_language: str | None = Column(String(10), nullable=True, comment="원본 언어 코드")
+    # 성인물 여부
+    adult: bool | None = Column(Boolean, nullable=True, comment="성인물 여부")
     # 프랜차이즈/컬렉션 이름
     collection_name: str | None = Column(String(200), nullable=True, comment="프랜차이즈/컬렉션 이름")
     # ── KOBIS 보강 컬럼 ──
@@ -238,7 +240,7 @@ class SearchHistory(Base):
     검색어 입력과 결과 클릭 이벤트를 모두 저장합니다.
     최근 검색어 화면에서는 동일 키워드를 최신 시각 기준으로 한 번만 노출합니다.
 
-    DDL: init.sql의 search_history 테이블
+    DDL: Backend JPA가 관리하는 search_history 테이블
     """
     __tablename__ = "search_history"
     __table_args__ = (
@@ -246,8 +248,14 @@ class SearchHistory(Base):
         Index("idx_search_history_user_time", "user_id", "searched_at"),
     )
 
-    # 검색 이력 고유 식별자 (DDL: BIGINT AUTO_INCREMENT, SQLite 호환 variant)
-    id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True)
+    # 2026-03-24 backend 스키마 변경: PK 컬럼명 id -> search_history_id
+    # Python 속성명은 기존 호환을 위해 id 로 유지하고, 실제 DB 컬럼명만 맞춥니다.
+    id: int = Column(
+        "search_history_id",
+        AutoIncrementBigInt,
+        primary_key=True,
+        autoincrement=True,
+    )
     # 검색한 사용자 ID (VARCHAR(50))
     user_id: str = Column(String(50), nullable=False, index=True, comment="사용자 ID")
     # 검색 키워드 (공백 제거 후 저장)

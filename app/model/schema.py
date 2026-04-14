@@ -102,6 +102,12 @@ class MovieSearchResponse(BaseModel):
     """
     movies: list[MovieBrief] = Field(description="검색 결과 영화 목록")
     pagination: PaginationMeta = Field(description="페이지네이션 정보")
+    did_you_mean: str | None = Field(default=None, description="오타 교정 추천어")
+    related_queries: list[str] = Field(default_factory=list, description="관련 추천 검색어 목록")
+    search_source: str | None = Field(
+        default=None,
+        description="실제 검색에 사용된 소스 (elasticsearch/mysql/null)",
+    )
 
 
 class AutocompleteResponse(BaseModel):
@@ -112,6 +118,7 @@ class AutocompleteResponse(BaseModel):
     최대 10건, Redis 캐시 사용 (TTL 5분).
     """
     suggestions: list[str] = Field(description="자동완성 키워드 후보 목록 (최대 10건)")
+    did_you_mean: str | None = Field(default=None, description="오타 교정 추천어")
 
 
 class TrendingKeywordItem(BaseModel):

@@ -43,6 +43,7 @@ class MovieDTO(BaseModel):
     tagline: Optional[str] = None
     imdb_id: Optional[str] = None
     original_language: Optional[str] = None
+    adult: Optional[bool] = None
     collection_name: Optional[str] = None
     # KOBIS 보강 컬럼
     kobis_movie_cd: Optional[str] = None
