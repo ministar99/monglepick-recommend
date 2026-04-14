@@ -109,8 +109,8 @@ class ReviewService:
             raise ValueError("요청 본문의 movie_id와 경로의 movie_id가 일치하지 않습니다.")
 
         # 중복 리뷰 차단 — Backend ReviewService 와 정책 일치 (1 유저 1 영화 1 리뷰).
-        # race condition 으로 INSERT 직전에 중복이 발생할 여지는 남지만,
-        # reviews 테이블에 (user_id, movie_id) UNIQUE 제약이 설정되어 있으면 DB 레이어에서 최종 차단된다.
+        # 운영 정책상 reviews 테이블에 DB UNIQUE 제약은 걸지 않고, 서비스 레이어에서만 검증한다.
+        # 동시 요청으로 발생할 수 있는 race condition 중복은 후속 정합성 작업(관리자 큐 등)에서 처리한다.
         if await self._repo.exists_by_user_movie(user_id, movie_id):
             raise DuplicateReviewError("이미 이 영화에 리뷰를 작성하셨습니다.")
 
