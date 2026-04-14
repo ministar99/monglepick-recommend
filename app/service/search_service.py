@@ -38,6 +38,7 @@ from app.model.schema import (
 from app.repository.movie_repository import MovieRepository
 from app.repository.search_history_repository import SearchHistoryRepository
 from app.repository.trending_repository import TrendingRepository
+from app.search_elasticsearch import ESSearchMovieItem, ElasticsearchSearchClient
 from app.search_genre_catalog import (
     expand_search_genre_aliases,
     get_search_genre_alias_groups,
@@ -62,6 +63,7 @@ class SearchService:
         self._movie_repo = MovieRepository(session)
         self._history_repo = SearchHistoryRepository(session)
         self._trending_repo = TrendingRepository(session)
+        self._search_es = ElasticsearchSearchClient()
 
     async def search_movies(
         self,
@@ -126,26 +128,57 @@ class SearchService:
         # 관련도순은 프런트에서 기본 검색 결과를 그대로 유지하므로 DB에는 기본 검색 순서를 요청합니다.
         # 최신순은 "검색 시작 시점의 기준 정렬"로 사용되므로 DB에서도 실제 개봉일 정렬을 타야 합니다.
         db_sort_by = "relevance" if sort_by == "relevance" else sort_by
+        did_you_mean: str | None = None
+        related_queries: list[str] = []
+        search_source: str | None = None
 
         # ─────────────────────────────────────
-        # MySQL 검색 실행
+        # Elasticsearch 우선 검색 (키워드 검색만)
         # ─────────────────────────────────────
-        movies, total = await self._movie_repo.search(
-            keyword=keyword_cleaned,
-            search_type=search_type,
-            genre=genre,
-            genres=expanded_genres if is_genre_discovery_search else None,
-            genre_match_groups=selected_genre_alias_groups if is_genre_discovery_search else None,
-            year_from=year_from,
-            year_to=year_to,
-            rating_min=rating_min,
-            rating_max=rating_max,
-            vote_count_min=genre_discovery_vote_count_min,
-            sort_by=db_sort_by,
-            sort_order=sort_order,
-            page=page,
-            size=size,
-        )
+        es_movies: list[ESSearchMovieItem] | None = None
+        total = 0
+        if keyword_cleaned is not None:
+            es_result = await self._search_es.search_movies(
+                keyword=keyword_cleaned,
+                search_type=search_type,
+                genre=genre,
+                year_from=year_from,
+                year_to=year_to,
+                rating_min=rating_min,
+                rating_max=rating_max,
+                vote_count_min=genre_discovery_vote_count_min,
+                sort_by=db_sort_by,
+                sort_order=sort_order,
+                page=page,
+                size=size,
+            )
+            if es_result is not None:
+                es_movies = es_result.movies
+                total = es_result.total
+                did_you_mean = es_result.did_you_mean
+                related_queries = es_result.related_queries
+                search_source = "elasticsearch"
+
+        if es_movies is None:
+            movies, total = await self._movie_repo.search(
+                keyword=keyword_cleaned,
+                search_type=search_type,
+                genre=genre,
+                genres=expanded_genres if is_genre_discovery_search else None,
+                genre_match_groups=selected_genre_alias_groups if is_genre_discovery_search else None,
+                year_from=year_from,
+                year_to=year_to,
+                rating_min=rating_min,
+                rating_max=rating_max,
+                vote_count_min=genre_discovery_vote_count_min,
+                sort_by=db_sort_by,
+                sort_order=sort_order,
+                page=page,
+                size=size,
+            )
+            search_source = "mysql"
+        else:
+            movies = []
         
         # ─────────────────────────────────────
         # 부수 작업: 검색 이력 + 인기 검색어 갱신
@@ -199,7 +232,11 @@ class SearchService:
         # ─────────────────────────────────────
         # 응답 변환
         # ─────────────────────────────────────
-        movie_briefs = [self._to_movie_brief(m) for m in movies]
+        movie_briefs = (
+            [self._to_movie_brief(m) for m in movies]
+            if es_movies is None
+            else [self._to_movie_brief_from_es(m) for m in es_movies]
+        )
         total_pages = ceil(total / size) if total > 0 else 0
 
         return MovieSearchResponse(
@@ -210,6 +247,9 @@ class SearchService:
                 total=total,
                 total_pages=total_pages,
             ),
+            did_you_mean=did_you_mean,
+            related_queries=related_queries,
+            search_source=search_source,
         )
 
     async def get_recent_searches(
@@ -239,7 +279,7 @@ class SearchService:
             RecentSearchItem(
                 keyword=r.keyword,
                 searched_at=r.searched_at,
-                filters=r.filters,
+                filters=self._normalize_recent_filters(r.filters),
             )
             for r in records
         ]
@@ -253,6 +293,10 @@ class SearchService:
                 next_offset=next_offset,
             ),
         )
+
+    def _normalize_recent_filters(self, filters) -> dict | None:
+        """최근 검색 응답에서 filters가 dict가 아닐 경우 안전하게 제거합니다."""
+        return filters if isinstance(filters, dict) else None
 
     async def log_search_click(
         self,
@@ -385,6 +429,25 @@ class SearchService:
             release_year=movie.release_year,
             rating=movie.rating,
             # H4NN4N PR #28 장르 탐색 응답이 vote_count 필드를 요구하므로 포함한다.
+            vote_count=movie.vote_count,
+            poster_url=poster_url,
+            trailer_url=movie.trailer_url,
+            overview=movie.overview,
+        )
+
+    def _to_movie_brief_from_es(self, movie: ESSearchMovieItem) -> MovieBrief:
+        """ES 검색 결과 문서를 기존 검색 응답 스키마에 맞춰 정규화합니다."""
+        poster_url = None
+        if movie.poster_path:
+            poster_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{movie.poster_path}"
+
+        return MovieBrief(
+            movie_id=movie.movie_id,
+            title=movie.title,
+            title_en=movie.title_en,
+            genres=movie.genres,
+            release_year=movie.release_year,
+            rating=movie.rating,
             vote_count=movie.vote_count,
             poster_url=poster_url,
             trailer_url=movie.trailer_url,
