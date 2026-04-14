@@ -524,11 +524,16 @@ class MovieRepository:
             Movie.certification.is_(None),
             ~Movie.certification.in_(EXCLUDED_SEARCH_CERTIFICATIONS),
         )
+        adult_visible_condition = or_(
+            Movie.adult.is_(None),
+            Movie.adult.is_(False),
+        )
         genre_visible_condition = or_(
             Movie.genres.is_(None),
             ~self._json_array_contains(Movie.genres, EXCLUDED_SEARCH_GENRES[0]),
         )
         return (
+            adult_visible_condition,
             certification_visible_condition,
             genre_visible_condition,
         )

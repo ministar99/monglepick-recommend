@@ -65,6 +65,7 @@ from app.config import get_settings
 from app.core.database import close_db, init_db
 from app.core.redis import close_redis, init_redis
 from app.core.scheduler import shutdown_scheduler, start_scheduler
+from app.search_elasticsearch import ElasticsearchSearchClient
 from app.v2.core.database import close_pool, init_pool
 
 # ─────────────────────────────────────────
@@ -165,6 +166,12 @@ async def lifespan(app: FastAPI):
     logger.info(f"서버: {settings.SERVER_HOST}:{settings.SERVER_PORT}")
     logger.info(f"MySQL: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
     logger.info(f"Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}")
+    logger.info(
+        "Search ES: enabled=%s url=%s index=%s",
+        settings.SEARCH_ES_ENABLED,
+        settings.ELASTICSEARCH_URL,
+        settings.ELASTICSEARCH_INDEX,
+    )
     logger.info("=" * 50)
 
     yield  # 앱 실행 중
@@ -176,6 +183,7 @@ async def lifespan(app: FastAPI):
         await shutdown_scheduler()
     except Exception as e:
         logger.warning(f"[WARN] 스케줄러 종료 실패: {e}")
+    await ElasticsearchSearchClient.close_shared_client()
     await close_redis()
     await close_pool()   # v2 aiomysql 커넥션 풀 종료
     await close_db()     # v1 SQLAlchemy 엔진 종료

@@ -19,6 +19,10 @@ from typing import Optional
 import aiomysql
 
 from app.v2.model.dto import MovieDTO
+from app.repository.movie_repository import (
+    EXCLUDED_SEARCH_CERTIFICATIONS,
+    EXCLUDED_SEARCH_GENRES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +42,13 @@ class MovieRepository:
         keyword: str | None = None,
         search_type: str = "title",
         genre: str | None = None,
+        genres: list[str] | None = None,
+        genre_match_groups: list[list[str]] | None = None,
         year_from: int | None = None,
         year_to: int | None = None,
         rating_min: float | None = None,
         rating_max: float | None = None,
+        vote_count_min: int | None = None,
         sort_by: str = "rating",
         sort_order: str = "desc",
         page: int = 1,
@@ -71,6 +78,15 @@ class MovieRepository:
         # ─────────────────────────────────────
         conditions: list[str] = []
         params: list = []
+
+        # 검색 결과 공통 노출 정책을 모든 Raw SQL 경로에 동일하게 적용한다.
+        conditions.append("(adult IS NULL OR adult = 0)")
+        conditions.append(
+            "(certification IS NULL OR certification NOT IN (%s, %s))"
+        )
+        params.extend(list(EXCLUDED_SEARCH_CERTIFICATIONS))
+        conditions.append('(genres IS NULL OR CAST(genres AS CHAR) NOT LIKE %s)')
+        params.append(f'%"{EXCLUDED_SEARCH_GENRES[0]}"%')
 
         # 키워드 검색 필터
         if keyword and keyword.strip():
@@ -102,6 +118,12 @@ class MovieRepository:
             conditions.append("JSON_CONTAINS(genres, JSON_QUOTE(%s))")
             params.append(genre)
 
+        if genres:
+            unique_genres = list(dict.fromkeys(genres))
+            genre_conditions = ["JSON_CONTAINS(genres, JSON_QUOTE(%s))" for _ in unique_genres]
+            conditions.append(f"({' OR '.join(genre_conditions)})")
+            params.extend(unique_genres)
+
         # 연도 필터
         if year_from is not None:
             conditions.append("release_year >= %s")
@@ -117,6 +139,9 @@ class MovieRepository:
         if rating_max is not None:
             conditions.append("rating <= %s")
             params.append(rating_max)
+        if vote_count_min is not None:
+            conditions.append("vote_count >= %s")
+            params.append(vote_count_min)
 
         # WHERE 절 조합
         where_clause = ""
@@ -126,15 +151,45 @@ class MovieRepository:
         # ─────────────────────────────────────
         # 정렬 적용 (NULLS LAST 구현: column IS NULL, column ASC/DESC)
         # ─────────────────────────────────────
-        sort_column_map = {
-            "rating": "rating",
-            "release_year": "release_year",
-            "release_date": "release_year",   # 하위 호환
-            "title": "title",
-        }
-        column = sort_column_map.get(sort_by, "rating")
         direction = "ASC" if sort_order == "asc" else "DESC"
-        order_clause = f"ORDER BY {column} IS NULL, {column} {direction}"
+        sort_parts: list[str] = []
+        sort_params: list = []
+
+        if genre_match_groups:
+            for alias_group in genre_match_groups:
+                unique_aliases = [alias for alias in dict.fromkeys(alias_group) if alias]
+                if not unique_aliases:
+                    continue
+                alias_sql = " OR ".join(["JSON_CONTAINS(genres, JSON_QUOTE(%s))" for _ in unique_aliases])
+                sort_parts.append(f"(CASE WHEN ({alias_sql}) THEN 1 ELSE 0 END) DESC")
+                sort_params.extend(unique_aliases)
+
+        if sort_by == "title":
+            sort_parts.extend([
+                f"title IS NULL ASC",
+                f"title {direction}",
+                "release_year IS NULL ASC",
+                "release_year DESC",
+            ])
+        elif sort_by == "release_date":
+            sort_parts.extend([
+                "release_year IS NULL ASC",
+                f"release_year {direction}",
+                "rating IS NULL ASC",
+                "rating DESC",
+            ])
+        else:
+            column = "rating"
+            sort_parts.extend([
+                f"{column} IS NULL ASC",
+                f"{column} {direction if sort_by == 'rating' else 'DESC'}",
+                "vote_count IS NULL ASC",
+                "vote_count DESC",
+                "release_year IS NULL ASC",
+                "release_year DESC",
+            ])
+
+        order_clause = f"ORDER BY {', '.join(sort_parts)}"
 
         # ─────────────────────────────────────
         # 페이지네이션
@@ -146,7 +201,7 @@ class MovieRepository:
         # 검색 결과 쿼리 실행
         # ─────────────────────────────────────
         select_sql = f"SELECT * FROM movies {where_clause} {order_clause} {limit_clause}"
-        select_params = params + [size, offset]
+        select_params = params + sort_params + [size, offset]
 
         async with self._conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(select_sql, select_params)

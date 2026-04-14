@@ -248,7 +248,6 @@ async def get_recent_searches(
     offset: int = Query(default=0, description="중복 제거된 목록 기준 시작 위치", ge=0),
     limit: int = Query(default=10, description="페이지당 조회 개수 (최대 10건)", ge=1, le=10),
     db: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
 ):
     """
@@ -257,7 +256,7 @@ async def get_recent_searches(
     로그인 필수. 해당 사용자의 최근 검색어를 최신순으로 반환합니다.
     무한 스크롤 UI를 위해 offset 기반 페이지네이션을 지원합니다.
     """
-    service = SearchService(db, redis)
+    service = SearchService(db)
     return await service.get_recent_searches(user_id=user_id, offset=offset, limit=limit)
 
 
@@ -268,7 +267,6 @@ async def get_recent_searches(
 )
 async def delete_all_recent(
     db: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
 ):
     """
@@ -276,7 +274,7 @@ async def delete_all_recent(
 
     로그인 필수. 사용자의 모든 검색 이력을 삭제합니다.
     """
-    service = SearchService(db, redis)
+    service = SearchService(db)
     deleted_count = await service.delete_all_recent(user_id)
     return {"message": f"{deleted_count}건의 검색 이력이 삭제되었습니다."}
 
@@ -289,7 +287,6 @@ async def delete_all_recent(
 async def delete_recent_keyword(
     keyword: str,
     db: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
 ):
     """
@@ -297,7 +294,7 @@ async def delete_recent_keyword(
 
     로그인 필수. 지정한 키워드를 검색 이력에서 삭제합니다.
     """
-    service = SearchService(db, redis)
+    service = SearchService(db)
     success = await service.delete_recent_keyword(user_id, keyword)
     if not success:
         raise HTTPException(

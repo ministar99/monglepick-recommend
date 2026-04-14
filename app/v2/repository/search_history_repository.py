@@ -86,7 +86,23 @@ class SearchHistoryRepository:
         Returns:
             최근 검색 이력 DTO 목록 (최신순 정렬)
         """
-        max_count = limit or self._settings.RECENT_SEARCH_MAX
+        records, _ = await self.get_recent_page(user_id=user_id, offset=0, limit=limit)
+        return records
+
+    async def get_recent_page(
+        self,
+        user_id: str,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> tuple[list[SearchHistoryDTO], bool]:
+        """
+        사용자의 최근 검색어를 페이지 단위로 반환합니다.
+
+        중복 키워드는 가장 최근 레코드 1건만 남기고,
+        offset은 "중복 제거가 끝난 목록" 기준으로 계산합니다.
+        """
+        start_offset = max(0, offset)
+        max_count = min(limit or self._settings.RECENT_SEARCH_MAX, self._settings.RECENT_SEARCH_MAX)
         sql = (
             "SELECT * FROM search_history "
             "WHERE user_id = %s "
@@ -98,6 +114,7 @@ class SearchHistoryRepository:
 
         unique_rows: list[SearchHistoryDTO] = []
         seen_keywords: set[str] = set()
+        skipped_unique_count = 0
 
         for row in rows:
             keyword = row["keyword"]
@@ -105,11 +122,16 @@ class SearchHistoryRepository:
                 continue
 
             seen_keywords.add(keyword)
+            if skipped_unique_count < start_offset:
+                skipped_unique_count += 1
+                continue
+
             unique_rows.append(SearchHistoryDTO(**row))
-            if len(unique_rows) >= max_count:
+            if len(unique_rows) > max_count:
                 break
 
-        return unique_rows
+        has_more = len(unique_rows) > max_count
+        return unique_rows[:max_count], has_more
 
     async def delete_keyword(self, user_id: str, keyword: str) -> bool:
         """
