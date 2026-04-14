@@ -19,7 +19,7 @@ from app.model.schema import (
     UserReviewListResponse,
 )
 from app.v2.api.deps import get_conn, get_current_user, get_current_user_optional
-from app.v2.service.review_service import ReviewService
+from app.v2.service.review_service import DuplicateReviewError, ReviewService
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,9 @@ async def get_reviews(
     response_model=ReviewItem,
     status_code=status.HTTP_201_CREATED,
     summary="리뷰 작성",
+    responses={
+        409: {"description": "이미 해당 영화에 리뷰를 작성한 경우"},
+    },
 )
 async def create_review(
     payload: ReviewCreateRequest,
@@ -63,12 +66,20 @@ async def create_review(
     conn: aiomysql.Connection = Depends(get_conn),
     user_id: str = Depends(get_current_user),
 ) -> ReviewItem:
-    """영화 리뷰를 작성한다. 같은 영화에 여러 리뷰를 남길 수 있다."""
+    """
+    영화 리뷰를 작성한다.
+
+    "봤다 = 리뷰" 단일 진실 원본 원칙에 따라 1 유저 1 영화 1 리뷰만 허용한다.
+    이미 작성한 영화에 재요청 시 HTTP 409 Conflict 로 응답한다
+    (Backend `monglepick-backend` ReviewService 의 DUPLICATE_REVIEW 와 동일 정책).
+    """
     service = ReviewService(conn)
     try:
         return await service.create_review(movie_id=movie_id, payload=payload, user_id=user_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except DuplicateReviewError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @movie_review_router.put(
