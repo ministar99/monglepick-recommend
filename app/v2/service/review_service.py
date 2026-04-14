@@ -27,6 +27,20 @@ from app.v2.repository.review_repository import ReviewRepository
 logger = logging.getLogger(__name__)
 
 
+class DuplicateReviewError(Exception):
+    """
+    동일 사용자가 동일 영화에 이미 리뷰를 작성한 경우 발생시키는 예외.
+
+    Backend(`monglepick-backend`) `ReviewService.create()` 가
+    `ErrorCode.DUPLICATE_REVIEW` → HTTP 409 로 반환하는 정책과 일관성을 맞추기 위해,
+    Recommend v2 도 동일 케이스에서 409 Conflict 를 내보낸다.
+
+    API 레이어(`app.v2.api.review.create_review`) 에서 HTTPException(409) 로 매핑된다.
+    """
+
+    pass
+
+
 class ReviewService:
     """리뷰 비즈니스 로직 서비스."""
 
@@ -84,9 +98,21 @@ class ReviewService:
         payload: ReviewCreateRequest,
         user_id: str,
     ) -> ReviewItem:
-        """영화 리뷰를 작성한다."""
+        """영화 리뷰를 작성한다.
+
+        같은 사용자가 같은 영화에 대해서는 1개의 리뷰만 허용한다.
+        ("봤다 = 리뷰" 단일 진실 원본 원칙, CLAUDE.md 참조)
+        이미 리뷰를 작성했다면 DuplicateReviewError 를 던지고
+        API 레이어에서 HTTP 409 로 변환된다.
+        """
         if payload.movie_id and payload.movie_id != movie_id:
             raise ValueError("요청 본문의 movie_id와 경로의 movie_id가 일치하지 않습니다.")
+
+        # 중복 리뷰 차단 — Backend ReviewService 와 정책 일치 (1 유저 1 영화 1 리뷰).
+        # race condition 으로 INSERT 직전에 중복이 발생할 여지는 남지만,
+        # reviews 테이블에 (user_id, movie_id) UNIQUE 제약이 설정되어 있으면 DB 레이어에서 최종 차단된다.
+        if await self._repo.exists_by_user_movie(user_id, movie_id):
+            raise DuplicateReviewError("이미 이 영화에 리뷰를 작성하셨습니다.")
 
         row = await self._repo.create(
             user_id=user_id,
