@@ -75,6 +75,8 @@ class SearchService:
         year_to: int | None = None,
         rating_min: float | None = None,
         rating_max: float | None = None,
+        popularity_min: float | None = None,
+        popularity_max: float | None = None,
         sort_by: str = "rating",
         sort_order: str = "desc",
         page: int = 1,
@@ -98,6 +100,8 @@ class SearchService:
             year_to: 끝 연도
             rating_min: 최소 평점
             rating_max: 최대 평점
+            popularity_min: 최소 인기도
+            popularity_max: 최대 인기도
             sort_by: 정렬 기준 ("relevance", "rating", "release_date", "title")
             sort_order: 정렬 방향 ("asc", "desc")
             page: 페이지 번호 (1부터)
@@ -146,6 +150,8 @@ class SearchService:
                 year_to=year_to,
                 rating_min=rating_min,
                 rating_max=rating_max,
+                popularity_min=popularity_min,
+                popularity_max=popularity_max,
                 vote_count_min=genre_discovery_vote_count_min,
                 sort_by=db_sort_by,
                 sort_order=sort_order,
@@ -170,6 +176,8 @@ class SearchService:
                 year_to=year_to,
                 rating_min=rating_min,
                 rating_max=rating_max,
+                popularity_min=popularity_min,
+                popularity_max=popularity_max,
                 vote_count_min=genre_discovery_vote_count_min,
                 sort_by=db_sort_by,
                 sort_order=sort_order,
@@ -204,6 +212,8 @@ class SearchService:
                             year_to=year_to,
                             rating_min=rating_min,
                             rating_max=rating_max,
+                            popularity_min=popularity_min,
+                            popularity_max=popularity_max,
                             sort_by=sort_by,
                             sort_order=sort_order,
                             page=page,
@@ -379,6 +389,8 @@ class SearchService:
         year_to: int | None,
         rating_min: float | None,
         rating_max: float | None,
+        popularity_min: float | None,
+        popularity_max: float | None,
         sort_by: str,
         sort_order: str,
         page: int,
@@ -394,6 +406,8 @@ class SearchService:
             "year_to": year_to,
             "rating_min": rating_min,
             "rating_max": rating_max,
+            "popularity_min": popularity_min,
+            "popularity_max": popularity_max,
             "sort_by": sort_by,
             "sort_order": sort_order,
             "page": page,
