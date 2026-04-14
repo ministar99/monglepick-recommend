@@ -642,6 +642,14 @@ async def test_movie_detail_normalizes_date_typed_kobis_open_dt(async_session: A
     assert detail.release_date == "2026-04-13"
 
 
+def test_search_history_primary_key_column_matches_backend_schema():
+    """검색 이력 ORM은 backend 실DB 컬럼명 search_history_id를 사용해야 합니다."""
+    primary_keys = list(SearchHistory.__table__.primary_key.columns)
+
+    assert len(primary_keys) == 1
+    assert primary_keys[0].name == "search_history_id"
+
+
 # =========================================
 # 최근 검색어 테스트
 # =========================================
@@ -825,6 +833,30 @@ async def test_recent_searches_support_offset_pagination_without_duplicates(
     assert second_data["pagination"]["next_offset"] == 20
     assert third_data["pagination"]["has_more"] is True
     assert third_data["pagination"]["next_offset"] == 30
+
+
+@pytest.mark.asyncio
+async def test_recent_searches_ignores_legacy_non_dict_filters(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """과거 잘못 저장된 filters 값이 있어도 최근 검색 조회가 500 없이 동작해야 합니다."""
+    async_session.add(
+        SearchHistory(
+            user_id="test_user_1",
+            keyword="레거시검색",
+            result_count=1,
+            filters="legacy-string-filter",
+        )
+    )
+    await async_session.flush()
+
+    response = await client.get("/api/v1/search/recent")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["searches"][0]["keyword"] == "레거시검색"
+    assert data["searches"][0]["filters"] is None
 
 
 @pytest.mark.asyncio

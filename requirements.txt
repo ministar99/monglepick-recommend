@@ -9,6 +9,7 @@ uvicorn[standard]>=0.30.0
 # ORM / 비동기 DB
 sqlalchemy[asyncio]>=2.0.0
 aiomysql>=0.2.0
+aiohttp>=3.11.0,<4.0.0
 
 # Redis 캐시
 redis[hiredis]>=5.0.0

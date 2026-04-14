@@ -15,6 +15,7 @@ import redis.asyncio as aioredis
 
 from app.config import get_settings
 from app.model.schema import AutocompleteResponse
+from app.search_elasticsearch import ElasticsearchSearchClient
 from app.v2.repository.movie_repository import MovieRepository
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ class AutocompleteService:
     """검색어 자동완성 서비스 (v2 Raw SQL)"""
 
     # Redis 캐시 키 접두어
-    CACHE_KEY_PREFIX = "autocomplete:"
+    CACHE_KEY_PREFIX = "autocomplete:v2:"
 
     def __init__(self, conn: aiomysql.Connection, redis_client: aioredis.Redis):
         """
@@ -36,6 +37,7 @@ class AutocompleteService:
         self._redis = redis_client
         self._settings = get_settings()
         self._movie_repo = MovieRepository(conn)
+        self._search_es = ElasticsearchSearchClient()
 
     async def get_suggestions(
         self, prefix: str, limit: int = 10
@@ -49,30 +51,49 @@ class AutocompleteService:
         """
         prefix_stripped = prefix.strip()
         if not prefix_stripped:
-            return AutocompleteResponse(suggestions=[])
+            return AutocompleteResponse(suggestions=[], did_you_mean=None)
 
         # 1단계: Redis 캐시 확인
         cache_key = f"{self.CACHE_KEY_PREFIX}{prefix_stripped.lower()}"
         try:
             cached = await self._redis.get(cache_key)
             if cached:
-                suggestions = json.loads(cached)
+                payload = json.loads(cached)
+                suggestions = payload.get("suggestions", []) if isinstance(payload, dict) else payload
+                did_you_mean = payload.get("did_you_mean") if isinstance(payload, dict) else None
                 logger.debug(f"자동완성 캐시 히트: prefix='{prefix_stripped}', 건수={len(suggestions)}")
-                return AutocompleteResponse(suggestions=suggestions[:limit])
+                return AutocompleteResponse(
+                    suggestions=suggestions[:limit],
+                    did_you_mean=did_you_mean,
+                )
         except Exception as e:
             logger.warning(f"Redis 자동완성 캐시 조회 실패: {e}")
 
-        # 2단계: MySQL 검색 (캐시 미스)
-        titles = await self._movie_repo.autocomplete_titles(prefix_stripped, limit)
+        # 2단계: Elasticsearch 우선 검색
+        es_result = await self._search_es.autocomplete(prefix_stripped, limit)
+        if es_result is not None:
+            response = AutocompleteResponse(
+                suggestions=es_result.suggestions[:limit],
+                did_you_mean=es_result.did_you_mean,
+            )
+        else:
+            titles = await self._movie_repo.autocomplete_titles(prefix_stripped, limit)
+            response = AutocompleteResponse(suggestions=titles, did_you_mean=None)
 
         # 3단계: Redis 캐싱
         try:
             await self._redis.setex(
                 cache_key,
                 self._settings.AUTOCOMPLETE_CACHE_TTL,
-                json.dumps(titles, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "suggestions": response.suggestions,
+                        "did_you_mean": response.did_you_mean,
+                    },
+                    ensure_ascii=False,
+                ),
             )
         except Exception as e:
             logger.warning(f"Redis 자동완성 캐싱 실패: {e}")
 
-        return AutocompleteResponse(suggestions=titles)
+        return response

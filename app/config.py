@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     # -----------------------------------------
     # 자동완성 Redis 캐시 TTL (초)
     AUTOCOMPLETE_CACHE_TTL: int = 300  # 5분
+    # 검색용 Elasticsearch 활성화 여부
+    SEARCH_ES_ENABLED: bool = False
+    # 검색용 Elasticsearch 접속 URL
+    ELASTICSEARCH_URL: str | None = None
+    # 검색용 Elasticsearch 인덱스명
+    ELASTICSEARCH_INDEX: str = "movies_bm25"
     # 인기 검색어 집계 기간 (시간)
     TRENDING_WINDOW_HOURS: int = 24
     # 인기 검색어 표시 개수
