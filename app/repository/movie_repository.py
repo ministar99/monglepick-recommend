@@ -54,6 +54,8 @@ class MovieRepository:
         year_to: int | None = None,
         rating_min: float | None = None,
         rating_max: float | None = None,
+        popularity_min: float | None = None,
+        popularity_max: float | None = None,
         vote_count_min: int | None = None,
         sort_by: str = "rating",
         sort_order: str = "desc",
@@ -73,6 +75,8 @@ class MovieRepository:
             year_to: 개봉 연도 끝 (포함)
             rating_min: 최소 평점 (포함)
             rating_max: 최대 평점 (포함)
+            popularity_min: 최소 인기도 (포함)
+            popularity_max: 최대 인기도 (포함)
             vote_count_min: 최소 평점 참여 인원 수 (포함)
             sort_by: 정렬 기준 ("relevance", "rating", "release_year", "title")
             sort_order: 정렬 방향 ("asc", "desc")
@@ -176,6 +180,17 @@ class MovieRepository:
         if rating_max is not None:
             query = query.where(Movie.rating <= rating_max)
             count_query = count_query.where(Movie.rating <= rating_max)
+
+        # ─────────────────────────────────────
+        # 인기도 필터
+        # ─────────────────────────────────────
+        if popularity_min is not None:
+            query = query.where(Movie.popularity_score >= popularity_min)
+            count_query = count_query.where(Movie.popularity_score >= popularity_min)
+
+        if popularity_max is not None:
+            query = query.where(Movie.popularity_score <= popularity_max)
+            count_query = count_query.where(Movie.popularity_score <= popularity_max)
 
         # ─────────────────────────────────────
         # 평점 참여 인원 수 필터
