@@ -48,6 +48,8 @@ class MovieRepository:
         year_to: int | None = None,
         rating_min: float | None = None,
         rating_max: float | None = None,
+        popularity_min: float | None = None,
+        popularity_max: float | None = None,
         vote_count_min: int | None = None,
         sort_by: str = "rating",
         sort_order: str = "desc",
@@ -65,6 +67,8 @@ class MovieRepository:
             year_to: 개봉 연도 끝 (포함)
             rating_min: 최소 평점 (포함)
             rating_max: 최대 평점 (포함)
+            popularity_min: 최소 인기도 (포함)
+            popularity_max: 최대 인기도 (포함)
             sort_by: 정렬 기준 ("rating", "release_year", "title")
             sort_order: 정렬 방향 ("asc", "desc")
             page: 페이지 번호 (1부터 시작)
@@ -139,6 +143,12 @@ class MovieRepository:
         if rating_max is not None:
             conditions.append("rating <= %s")
             params.append(rating_max)
+        if popularity_min is not None:
+            conditions.append("popularity_score >= %s")
+            params.append(popularity_min)
+        if popularity_max is not None:
+            conditions.append("popularity_score <= %s")
+            params.append(popularity_max)
         if vote_count_min is not None:
             conditions.append("vote_count >= %s")
             params.append(vote_count_min)

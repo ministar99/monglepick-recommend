@@ -66,6 +66,8 @@ async def search_movies(
     # 평점 범위
     rating_min: float | None = Query(default=None, description="최소 평점 (포함)", ge=0.0, le=10.0),
     rating_max: float | None = Query(default=None, description="최대 평점 (포함)", ge=0.0, le=10.0),
+    popularity_min: float | None = Query(default=None, description="최소 인기도 (TMDB popularity_score 기준)", ge=0.0),
+    popularity_max: float | None = Query(default=None, description="최대 인기도 (TMDB popularity_score 기준)", ge=0.0),
     # 정렬
     sort_by: str = Query(
         default="relevance",
@@ -103,6 +105,8 @@ async def search_movies(
         year_to=year_to,
         rating_min=rating_min,
         rating_max=rating_max,
+        popularity_min=popularity_min,
+        popularity_max=popularity_max,
         sort_by=sort_by,
         sort_order=sort_order,
         page=page,

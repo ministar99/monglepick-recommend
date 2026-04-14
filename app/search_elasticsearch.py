@@ -233,6 +233,8 @@ class ElasticsearchSearchClient:
         year_to: int | None,
         rating_min: float | None,
         rating_max: float | None,
+        popularity_min: float | None,
+        popularity_max: float | None,
         vote_count_min: int | None,
         sort_by: str,
         sort_order: str,
@@ -275,6 +277,8 @@ class ElasticsearchSearchClient:
                         year_to=year_to,
                         rating_min=rating_min,
                         rating_max=rating_max,
+                        popularity_min=popularity_min,
+                        popularity_max=popularity_max,
                         vote_count_min=vote_count_min,
                         capabilities=capabilities,
                     ),
@@ -390,6 +394,8 @@ class ElasticsearchSearchClient:
         year_to: int | None,
         rating_min: float | None,
         rating_max: float | None,
+        popularity_min: float | None,
+        popularity_max: float | None,
         vote_count_min: int | None,
         capabilities: ESIndexCapabilities,
     ) -> dict:
@@ -424,6 +430,10 @@ class ElasticsearchSearchClient:
             filters.append({"range": {"rating": {"gte": rating_min}}})
         if rating_max is not None:
             filters.append({"range": {"rating": {"lte": rating_max}}})
+        if popularity_min is not None:
+            filters.append({"range": {"popularity_score": {"gte": popularity_min}}})
+        if popularity_max is not None:
+            filters.append({"range": {"popularity_score": {"lte": popularity_max}}})
         if vote_count_min is not None:
             filters.append({"range": {"vote_count": {"gte": vote_count_min}}})
 
