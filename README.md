@@ -7,10 +7,12 @@ Spring Boot 백엔드(`monglepick-backend`)와 MySQL DB를 공유하며, 영화 
 ## 실행
 
 ```bash
-cp .env.example .env   # 환경변수 설정
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+cp .env.example .env          # 환경변수 설정
+uv sync --frozen              # uv.lock 기반 의존성 설치 (.venv 자동 생성)
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 ```
+
+> 패키지 매니저는 **uv 전용** 입니다. `requirements.txt` 는 사용하지 않으며, 의존성 추가/변경은 `pyproject.toml` + `uv.lock` 으로만 관리합니다.
 
 ## API 문서
 
