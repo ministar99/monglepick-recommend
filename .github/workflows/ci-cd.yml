@@ -34,12 +34,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
+
+      # uv 설치 — monglepick-recommend 는 uv 단일 패키지 매니저 사용 (requirements.txt 미사용)
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio aiosqlite httpx
+        # --frozen: uv.lock 진실원본 강제. dev 의존성(pytest/pytest-asyncio/aiosqlite/httpx) 은 pyproject 에 이미 포함됨.
+        run: uv sync --frozen
 
       - name: Test
         env:
@@ -62,7 +66,8 @@ jobs:
           SERVER_PORT: "8001"
           CORS_ORIGINS: http://localhost:3000,http://localhost:5173
           TMDB_IMAGE_BASE_URL: https://image.tmdb.org/t/p/w500
-        run: pytest tests/ -v --tb=short -q
+        # uv 가상환경 내 pytest 실행 (.venv 경로 해석 자동 처리)
+        run: uv run pytest tests/ -v --tb=short -q
 
   # ─── CD: 스테이징 배포 (Self-hosted 러너에서 직접 실행) ───
   deploy:
