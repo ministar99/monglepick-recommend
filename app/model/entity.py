@@ -204,29 +204,12 @@ class UserPreference(Base):
     __tablename__ = "user_preferences"
     __table_args__ = {"extend_existing": True}
 
-    # 선호도 고유 식별자 (DDL: BIGINT AUTO_INCREMENT, SQLite 호환 variant)
-    id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True)
-    # 사용자 FK (VARCHAR(50), UNIQUE)
-    user_id: str = Column(String(50), nullable=False, unique=True, comment="사용자 ID")
-    # ── 선호 조건 (모두 JSON 배열) ──
-    # 선호 장르 (예: ["액션", "SF"])
+    # 실제 운영 스키마는 별도 id 없이 user_id 1:1 레코드로 관리됩니다.
+    user_id: str = Column(String(50), primary_key=True, nullable=False, comment="사용자 ID")
+    # 운영 DB 기준으로 실제 사용 중인 최소 컬럼만 매핑합니다.
+    # recommend 온보딩은 현재 preferred_genres / preferred_moods만 읽고 씁니다.
     preferred_genres = Column(JSON, nullable=True, comment='선호 장르 ["액션","SF"]')
-    # 선호 무드 (예: ["스릴", "감동"])
     preferred_moods = Column(JSON, nullable=True, comment='선호 무드 ["스릴","감동"]')
-    # 선호 감독 (예: ["봉준호"])
-    preferred_directors = Column(JSON, nullable=True, comment='선호 감독 ["봉준호"]')
-    # 선호 배우 (예: ["송강호"])
-    preferred_actors = Column(JSON, nullable=True, comment='선호 배우 ["송강호"]')
-    # 선호 시대 (예: ["2020s"])
-    preferred_eras = Column(JSON, nullable=True, comment='선호 시대 ["2020s"]')
-    # 제외 장르 (예: ["호러"])
-    excluded_genres = Column(JSON, nullable=True, comment='제외 장르 ["호러"]')
-    # 선호 OTT 플랫폼 (예: ["넷플릭스"])
-    preferred_platforms = Column(JSON, nullable=True, comment='선호 OTT ["넷플릭스"]')
-    # 선호 관람등급
-    preferred_certification: str | None = Column(String(50), nullable=True, comment="선호 관람등급")
-    # 추가 선호 조건 (키-값 자유 형식)
-    extra_preferences = Column(JSON, nullable=True, comment="추가 선호 조건 (키-값 자유 형식)")
 
 
 # =========================================
@@ -311,7 +294,7 @@ class WorldcupResult(Base):
     우승 영화, 준우승, 4강 영화 ID와 각 라운드별 선택 로그를 기록합니다.
     이 데이터를 기반으로 장르/키워드 선호도 레이더 차트를 생성합니다.
 
-    DDL: init.sql의 worldcup_results 테이블
+    DDL: backend JPA 기준 worldcup_results 테이블
     주의: movie_id FK 타입은 VARCHAR(50)입니다 (Integer 아님).
     """
     __tablename__ = "worldcup_results"
@@ -319,8 +302,13 @@ class WorldcupResult(Base):
         Index("idx_worldcup_user", "user_id"),
     )
 
-    # 고유 식별자 (DDL: BIGINT AUTO_INCREMENT, SQLite 호환 variant)
-    id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True)
+    # 고유 식별자 (DDL: BIGINT AUTO_INCREMENT, 컬럼명: worldcup_result_id)
+    worldcup_result_id: int = Column(
+        "worldcup_result_id",
+        AutoIncrementBigInt,
+        primary_key=True,
+        autoincrement=True,
+    )
     # 사용자 ID (VARCHAR(50))
     user_id: str = Column(String(50), nullable=False, comment="사용자 ID")
     # 라운드 수 (16 또는 32)
@@ -337,10 +325,74 @@ class WorldcupResult(Base):
     genre_preferences: str | None = Column(Text, nullable=True, comment="장르 선호도 (JSON)")
     # 온보딩 완료 여부
     onboarding_completed: bool = Column(Boolean, nullable=False, default=False, comment="온보딩 완료 여부")
+    # worldcup_session 논리 참조
+    session_id: int | None = Column(BigInteger, nullable=True, comment="월드컵 세션 ID")
+    # 리워드 지급 여부
+    reward_granted: bool = Column(Boolean, nullable=False, default=False, comment="리워드 지급 여부")
+    # 전체 매치 수
+    total_matches: int | None = Column(Integer, nullable=True, comment="전체 매치 수")
     # 생성 시각
     created_at: datetime = Column(
         DateTime, nullable=False, default=func.now(), comment="생성 시각"
     )
+    # 수정 시각
+    updated_at: datetime = Column(
+        DateTime, nullable=False, default=func.now(), onupdate=func.now(), comment="수정 시각"
+    )
+
+
+class WorldcupCategory(Base):
+    """
+    월드컵 카테고리 엔티티
+
+    Backend JPA가 관리하는 worldcup_category 테이블을 읽기 전용에 가깝게 매핑합니다.
+    온보딩 월드컵 시작 화면에서 노출 가능한 카테고리 목록 계산에 사용합니다.
+    """
+    __tablename__ = "worldcup_category"
+    __table_args__ = {"extend_existing": True}
+
+    category_id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True)
+    category_code: str = Column(String(100), nullable=False, unique=True, comment="카테고리 코드")
+    category_name: str = Column(String(100), nullable=False, comment="카테고리 이름")
+    description: str | None = Column(Text, nullable=True, comment="카테고리 설명")
+    admin_note: str | None = Column(Text, nullable=True, comment="관리자 메모")
+    display_order: int = Column(Integer, nullable=False, default=0, comment="노출 순서")
+    is_enabled: bool = Column(Boolean, nullable=False, default=True, comment="노출 여부")
+    created_at: datetime = Column(DateTime, nullable=False, default=func.now(), comment="생성 시각")
+    updated_at: datetime = Column(
+        DateTime, nullable=False, default=func.now(), onupdate=func.now(), comment="수정 시각"
+    )
+    created_by: str | None = Column(String(50), nullable=True, comment="생성자")
+    updated_by: str | None = Column(String(50), nullable=True, comment="수정자")
+
+
+class WorldcupCandidate(Base):
+    """
+    월드컵 후보 엔티티
+
+    worldcup_candidate 테이블을 매핑합니다.
+    카테고리 기반 월드컵의 후보 수 계산과 랜덤 후보 선택에 사용합니다.
+    """
+    __tablename__ = "worldcup_candidate"
+    __table_args__ = (
+        Index("uk_worldcup_candidate_movie_category", "movie_id", "category_id", unique=True),
+        Index("idx_wcc_category", "category_id"),
+        Index("idx_wcc_active", "is_active"),
+        {"extend_existing": True},
+    )
+
+    id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True)
+    movie_id: str = Column(String(50), nullable=False, comment="영화 ID")
+    category_id: int = Column(BigInteger, nullable=False, comment="카테고리 ID")
+    popularity: float | None = Column(Float, nullable=True, comment="인기도 스냅샷")
+    is_active: bool = Column(Boolean, nullable=False, default=True, comment="활성 여부")
+    added_by: str | None = Column(String(50), nullable=True, comment="등록자")
+    created_at: datetime = Column(DateTime, nullable=False, default=func.now(), comment="생성 시각")
+    updated_at: datetime = Column(
+        DateTime, nullable=False, default=func.now(), onupdate=func.now(), comment="수정 시각"
+    )
+    created_by: str | None = Column(String(50), nullable=True, comment="생성자")
+    updated_by: str | None = Column(String(50), nullable=True, comment="수정자")
 
 
 # =========================================

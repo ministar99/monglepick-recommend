@@ -71,10 +71,10 @@ class UserPreferenceRepository:
             # 기존 레코드: preferred_genres만 갱신
             update_sql = (
                 "UPDATE user_preferences SET preferred_genres = %s "
-                "WHERE id = %s"
+                "WHERE user_id = %s"
             )
             async with self._conn.cursor() as cur:
-                await cur.execute(update_sql, (genres_json, existing.id))
+                await cur.execute(update_sql, (genres_json, user_id))
 
             existing.preferred_genres = genres
             return existing
@@ -86,10 +86,8 @@ class UserPreferenceRepository:
             )
             async with self._conn.cursor() as cur:
                 await cur.execute(insert_sql, (user_id, genres_json))
-                new_id = cur.lastrowid
 
             return UserPreferenceDTO(
-                id=new_id,
                 user_id=user_id,
                 preferred_genres=genres,
             )
@@ -114,10 +112,10 @@ class UserPreferenceRepository:
             # 기존 레코드: preferred_moods만 갱신
             update_sql = (
                 "UPDATE user_preferences SET preferred_moods = %s "
-                "WHERE id = %s"
+                "WHERE user_id = %s"
             )
             async with self._conn.cursor() as cur:
-                await cur.execute(update_sql, (moods_json, existing.id))
+                await cur.execute(update_sql, (moods_json, user_id))
 
             existing.preferred_moods = moods
             return existing
@@ -129,10 +127,8 @@ class UserPreferenceRepository:
             )
             async with self._conn.cursor() as cur:
                 await cur.execute(insert_sql, (user_id, moods_json))
-                new_id = cur.lastrowid
 
             return UserPreferenceDTO(
-                id=new_id,
                 user_id=user_id,
                 preferred_moods=moods,
             )
@@ -152,7 +148,11 @@ class UserPreferenceRepository:
             WorldcupResultDTO 또는 None
         """
         sql = (
-            "SELECT * FROM worldcup_results "
+            "SELECT worldcup_result_id, user_id, round_size, winner_movie_id, "
+            "runner_up_movie_id, semi_final_movie_ids, selection_log, "
+            "genre_preferences, onboarding_completed, session_id, reward_granted, "
+            "total_matches, created_at, updated_at, created_by, updated_by "
+            "FROM worldcup_results "
             "WHERE user_id = %s "
             "ORDER BY created_at DESC "
             "LIMIT 1"
@@ -172,6 +172,7 @@ class UserPreferenceRepository:
         semi_final_movie_ids: list[str] | None,
         selection_log: dict | None,
         genre_preferences: dict[str, float] | None,
+        session_id: int | None = None,
     ) -> WorldcupResultDTO:
         """
         월드컵 결과를 저장합니다.
@@ -189,6 +190,7 @@ class UserPreferenceRepository:
             저장된 WorldcupResultDTO
         """
         now = datetime.now(timezone.utc)
+        total_matches = max(round_size - 1, 0)
 
         # JSON 직렬화 (v1에서는 ORM이 자동 처리했던 부분)
         semi_json = json.dumps(semi_final_movie_ids) if semi_final_movie_ids else None
@@ -199,19 +201,20 @@ class UserPreferenceRepository:
             "INSERT INTO worldcup_results "
             "(user_id, round_size, winner_movie_id, runner_up_movie_id, "
             "semi_final_movie_ids, selection_log, genre_preferences, "
-            "onboarding_completed, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            "onboarding_completed, session_id, reward_granted, total_matches, "
+            "created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         async with self._conn.cursor() as cur:
             await cur.execute(insert_sql, (
                 user_id, round_size, winner_movie_id, runner_up_movie_id,
                 semi_json, log_json, prefs_json,
-                True, now,
+                True, session_id, False, total_matches, now, now,
             ))
             new_id = cur.lastrowid
 
         return WorldcupResultDTO(
-            id=new_id,
+            worldcup_result_id=new_id,
             user_id=user_id,
             round_size=round_size,
             winner_movie_id=winner_movie_id,
@@ -220,7 +223,11 @@ class UserPreferenceRepository:
             selection_log=log_json,
             genre_preferences=prefs_json,
             onboarding_completed=True,
+            session_id=session_id,
+            reward_granted=False,
+            total_matches=total_matches,
             created_at=now,
+            updated_at=now,
         )
 
     async def is_onboarding_completed(self, user_id: str) -> dict[str, bool]:
