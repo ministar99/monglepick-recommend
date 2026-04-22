@@ -470,6 +470,37 @@ class FavoriteMovieSaveRequest(BaseModel):
     )
 
 
+class FavoriteGenreOption(BaseModel):
+    """선호 장르 선택 UI에 노출할 장르 옵션"""
+    genre_id: int = Field(description="genre_master.genre_id")
+    genre_code: str = Field(description="장르 코드")
+    genre_name: str = Field(description="장르명")
+    contents_count: int = Field(description="해당 장르의 컨텐츠 수")
+
+
+class FavoriteGenreItem(BaseModel):
+    """사용자가 저장한 선호 장르 항목"""
+    fav_genre_id: int = Field(description="선호 장르 항목 ID")
+    genre_id: int = Field(description="genre_master.genre_id")
+    priority: int = Field(description="저장 순서 기반 우선순위")
+    created_at: datetime | None = Field(default=None, description="등록 시각")
+    genre: FavoriteGenreOption = Field(description="선택된 장르 정보")
+
+
+class FavoriteGenreListResponse(BaseModel):
+    """선호 장르 설정 화면 초기 로드 응답"""
+    available_genres: list[FavoriteGenreOption] = Field(description="선택 가능한 장르 목록")
+    selected_genres: list[FavoriteGenreItem] = Field(description="현재 저장된 선호 장르 목록")
+
+
+class FavoriteGenreSaveRequest(BaseModel):
+    """선호 장르 저장 요청"""
+    genre_ids: list[int] = Field(
+        default_factory=list,
+        description="사용자가 선택한 genre_master.genre_id 목록 (순서 포함)",
+    )
+
+
 class ReviewAuthor(BaseModel):
     """리뷰 작성자 표시 정보"""
     nickname: str = Field(description="작성자 닉네임")

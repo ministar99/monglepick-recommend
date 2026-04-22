@@ -11,6 +11,7 @@ v1(/api/v1)과 병렬 운영하여 A/B 비교 테스트를 지원합니다.
 
 from fastapi import APIRouter
 
+from app.v2.api.favorite_genre import router as favorite_genre_router
 from app.v2.api.favorite_movie import router as favorite_movie_router
 from app.v2.api.like import router as like_router
 from app.v2.api.match_cowatch import router as match_cowatch_router
@@ -42,6 +43,9 @@ api_v2_router.include_router(user_review_router)
 
 # 위시리스트 라우터 등록
 api_v2_router.include_router(wishlist_router)
+
+# 선호 장르 라우터 등록
+api_v2_router.include_router(favorite_genre_router)
 
 # 최애 영화 라우터 등록
 api_v2_router.include_router(favorite_movie_router)
