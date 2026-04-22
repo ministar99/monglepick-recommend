@@ -446,6 +446,30 @@ class WishlistListResponse(BaseModel):
     total: int = Field(description="전체 위시리스트 개수")
 
 
+class FavoriteMovieItem(BaseModel):
+    """최애 영화 개별 항목"""
+    fav_movie_id: int = Field(description="최애 영화 항목 ID")
+    movie_id: str = Field(description="영화 ID")
+    priority: int = Field(description="전시 우선순위")
+    created_at: datetime | None = Field(default=None, description="등록 시각")
+    movie: MovieBrief = Field(description="전시할 영화 정보")
+
+
+class FavoriteMovieListResponse(BaseModel):
+    """사용자의 최애 영화 목록 응답"""
+    favorite_movies: list[FavoriteMovieItem] = Field(description="최애 영화 항목 목록")
+    total: int = Field(description="현재 저장된 최애 영화 수")
+    max_count: int = Field(description="저장 가능한 최대 최애 영화 수")
+
+
+class FavoriteMovieSaveRequest(BaseModel):
+    """최애 영화 저장/순서 저장 요청"""
+    movie_ids: list[str] = Field(
+        default_factory=list,
+        description="사용자가 선택한 영화 ID 목록 (순서 포함, 최대 9편)",
+    )
+
+
 class ReviewAuthor(BaseModel):
     """리뷰 작성자 표시 정보"""
     nickname: str = Field(description="작성자 닉네임")
