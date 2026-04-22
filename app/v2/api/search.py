@@ -25,7 +25,7 @@ from app.model.schema import (
 )
 from app.search_genre_catalog import normalize_search_genre_labels
 from app.v2.service.autocomplete_service import AutocompleteService
-from app.v2.service.search_service import SearchService
+from app.v2.service.search_service import MovieDetailNotFoundError, SearchService
 from app.v2.service.trending_service import TrendingService
 
 logger = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ async def get_movie_detail(
     service = SearchService(conn)
     try:
         return await service.get_movie_detail(movie_id)
-    except ValueError as exc:
+    except MovieDetailNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),

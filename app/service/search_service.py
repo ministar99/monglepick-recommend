@@ -48,6 +48,10 @@ from app.search_genre_catalog import (
 logger = logging.getLogger(__name__)
 
 
+class MovieDetailNotFoundError(LookupError):
+    """영화 상세 조회 시 대상을 찾지 못한 경우의 도메인 예외입니다."""
+
+
 class SearchService:
     """영화 검색 비즈니스 로직 서비스"""
 
@@ -350,7 +354,7 @@ class SearchService:
         """
         movie = await self._movie_repo.find_by_id(movie_id)
         if movie is None:
-            raise ValueError(f"영화 ID '{movie_id}'를 찾을 수 없습니다.")
+            raise MovieDetailNotFoundError(f"영화 ID '{movie_id}'를 찾을 수 없습니다.")
         return self._to_movie_detail(movie)
 
     async def delete_recent_keyword(self, user_id: str, keyword: str) -> bool:
