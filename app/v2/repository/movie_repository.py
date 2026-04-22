@@ -17,6 +17,7 @@ import logging
 from typing import Optional
 
 import aiomysql
+from pydantic import ValidationError
 
 from app.v2.model.dto import MovieDTO
 from app.repository.movie_repository import (
@@ -234,18 +235,44 @@ class MovieRepository:
         """
         영화 ID로 단건 조회합니다.
 
+        먼저 movies.movie_id 로 조회하고, 없으면 숫자형 ID에 한해 tmdb_id 로 한 번 더 조회합니다.
+        검색 인덱스/외부 링크가 TMDB ID를 들고 들어오는 경우를 흡수하기 위한 fallback 입니다.
+
         Args:
-            movie_id: 영화 고유 ID (VARCHAR(50))
+            movie_id: 영화 고유 ID (VARCHAR(50)) 또는 TMDB ID 문자열
 
         Returns:
             MovieDTO 또는 None
         """
-        sql = "SELECT * FROM movies WHERE movie_id = %s"
         async with self._conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(sql, (movie_id,))
+            await cur.execute("SELECT * FROM movies WHERE movie_id = %s", (movie_id,))
             row = await cur.fetchone()
+            if row is None and movie_id.isdigit():
+                await cur.execute("SELECT * FROM movies WHERE tmdb_id = %s", (int(movie_id),))
+                row = await cur.fetchone()
 
-        return MovieDTO(**row) if row else None
+        if row is None:
+            return None
+
+        try:
+            return MovieDTO(**row)
+        except ValidationError as exc:
+            logger.error(
+                "movie_detail_row_validation_failed movie_id=%s errors=%s row_excerpt=%s",
+                movie_id,
+                exc.errors(),
+                {
+                    "movie_id": row.get("movie_id"),
+                    "title": row.get("title"),
+                    "release_year": row.get("release_year"),
+                    "runtime": row.get("runtime"),
+                    "rating": row.get("rating"),
+                    "vote_count": row.get("vote_count"),
+                    "adult": row.get("adult"),
+                    "source": row.get("source"),
+                },
+            )
+            raise
 
     async def find_by_ids(self, movie_ids: list[str]) -> list[MovieDTO]:
         """

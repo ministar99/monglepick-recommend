@@ -18,6 +18,8 @@ DDL 기준: Backend JPA 엔티티 (ddl-auto=update, 진실 원본)
 이 서비스가 소유하는 테이블:
 - search_history: 사용자별 최근 검색 이력
 - trending_keywords: 인기 검색어 집계
+- worldcup_session: 이상형 월드컵 진행 세션 저장
+- worldcup_match: 이상형 월드컵 라운드별 매치 저장
 - worldcup_results: 이상형 월드컵 결과 저장
 
 주의: 비즈니스 키(movie_id/user_id)는 VARCHAR(50)이며,
@@ -339,6 +341,83 @@ class WorldcupResult(Base):
     updated_at: datetime = Column(
         DateTime, nullable=False, default=func.now(), onupdate=func.now(), comment="수정 시각"
     )
+
+
+class WorldcupSession(Base):
+    """
+    이상형 월드컵 세션 엔티티
+
+    recommend 런타임이 월드컵 시작/진행/완료 상태를 영속화할 때 사용합니다.
+    실제 진행 상세는 Redis를 계속 사용하지만, 세션의 시작 조건과 최종 상태는
+    worldcup_session에 남겨 운영/분석 기준과 맞춥니다.
+    """
+    __tablename__ = "worldcup_session"
+    __table_args__ = (
+        Index("idx_session_user", "user_id", "status"),
+        Index("idx_session_source", "source_type"),
+        Index("idx_session_category", "category_id"),
+        {"extend_existing": True},
+    )
+
+    session_id: int = Column(
+        "session_id",
+        AutoIncrementBigInt,
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: str = Column(String(50), nullable=False, comment="사용자 ID")
+    source_type: str = Column(String(20), nullable=False, comment="시작 방식 (CATEGORY / GENRE)")
+    category_id: int | None = Column(BigInteger, nullable=True, comment="카테고리 ID")
+    selected_genres_json: str | None = Column(Text, nullable=True, comment="선택 장르 JSON")
+    candidate_pool_size: int = Column(Integer, nullable=False, comment="후보 풀 크기")
+    round_size: int = Column(Integer, nullable=False, comment="총 라운드 크기")
+    current_round: int = Column(Integer, nullable=False, comment="현재 라운드")
+    current_match_order: int = Column(Integer, nullable=False, default=0, comment="현재 라운드 매치 순서")
+    status: str = Column(String(20), nullable=False, default="IN_PROGRESS", comment="세션 상태")
+    winner_movie_id: str | None = Column(String(50), nullable=True, comment="우승 영화 ID")
+    started_at: datetime = Column(DateTime, nullable=False, default=func.now(), comment="시작 시각")
+    completed_at: datetime | None = Column(DateTime, nullable=True, comment="완료 시각")
+    reward_granted: bool = Column(Boolean, nullable=False, default=False, comment="리워드 지급 여부")
+    created_at: datetime = Column(DateTime, nullable=False, default=func.now(), comment="생성 시각")
+    updated_at: datetime = Column(
+        DateTime, nullable=False, default=func.now(), onupdate=func.now(), comment="수정 시각"
+    )
+    created_by: str | None = Column(String(50), nullable=True, comment="생성자")
+    updated_by: str | None = Column(String(50), nullable=True, comment="수정자")
+
+
+class WorldcupMatch(Base):
+    """
+    이상형 월드컵 매치 엔티티
+
+    각 세션의 라운드별 대진과 선택 결과를 저장합니다.
+    recommend는 라운드 단위 제출 구조이지만, 실제 매치 레코드는 DB에 남깁니다.
+    """
+    __tablename__ = "worldcup_match"
+    __table_args__ = (
+        Index("uk_session_round_order", "session_id", "round_number", "match_order", unique=True),
+        {"extend_existing": True},
+    )
+
+    match_id: int = Column(
+        "match_id",
+        AutoIncrementBigInt,
+        primary_key=True,
+        autoincrement=True,
+    )
+    session_id: int = Column(BigInteger, nullable=False, comment="월드컵 세션 ID")
+    round_number: int = Column(Integer, nullable=False, comment="라운드 번호")
+    match_order: int = Column(Integer, nullable=False, comment="라운드 내 순서")
+    movie_a_id: str = Column(String(50), nullable=False, comment="대결 영화 A ID")
+    movie_b_id: str = Column(String(50), nullable=False, comment="대결 영화 B ID")
+    winner_movie_id: str | None = Column(String(50), nullable=True, comment="선택된 승자 영화 ID")
+    selected_at: datetime | None = Column(DateTime, nullable=True, comment="선택 완료 시각")
+    created_at: datetime = Column(DateTime, nullable=False, default=func.now(), comment="생성 시각")
+    updated_at: datetime = Column(
+        DateTime, nullable=False, default=func.now(), onupdate=func.now(), comment="수정 시각"
+    )
+    created_by: str | None = Column(String(50), nullable=True, comment="생성자")
+    updated_by: str | None = Column(String(50), nullable=True, comment="수정자")
 
 
 class WorldcupCategory(Base):

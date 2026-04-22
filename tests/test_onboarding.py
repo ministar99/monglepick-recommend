@@ -20,10 +20,18 @@ SQLite 인메모리 DB + FakeRedis를 사용합니다.
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.model.entity import Movie, User, WorldcupCandidate, WorldcupCategory
+from app.model.entity import (
+    Movie,
+    User,
+    WorldcupCandidate,
+    WorldcupCategory,
+    WorldcupMatch,
+    WorldcupResult,
+    WorldcupSession,
+)
 from tests.conftest import TEST_USER_ID
 
 
@@ -278,6 +286,27 @@ async def test_generate_worldcup_bracket(client: AsyncClient, async_session: Asy
         assert "movie_b" in match
         assert match["movie_a"]["movie_id"] != match["movie_b"]["movie_id"]
 
+    session_result = await async_session.execute(
+        select(WorldcupSession).where(WorldcupSession.user_id == TEST_USER_ID)
+    )
+    saved_session = session_result.scalar_one()
+    assert saved_session.source_type == "GENRE"
+    assert saved_session.current_round == 16
+    assert saved_session.status == "IN_PROGRESS"
+    assert saved_session.completed_at is None
+
+    match_result = await async_session.execute(
+        select(WorldcupMatch)
+        .where(
+            WorldcupMatch.session_id == saved_session.session_id,
+            WorldcupMatch.round_number == 16,
+        )
+        .order_by(WorldcupMatch.match_order.asc())
+    )
+    saved_matches = list(match_result.scalars().all())
+    assert len(saved_matches) == 8
+    assert all(match.winner_movie_id is None for match in saved_matches)
+
 
 @pytest.mark.asyncio
 async def test_generate_worldcup_bracket_prioritizes_more_genre_matches(
@@ -308,6 +337,47 @@ async def test_generate_worldcup_bracket_prioritizes_more_genre_matches(
     # 2개 장르를 만족하는 영화 8편이 정확히 먼저 선발되어야 합니다.
     expected_priority_ids = {"1000", "1004", "1005", "1009", "1010", "1014", "1015", "1019"}
     assert candidate_ids == expected_priority_ids
+
+
+@pytest.mark.asyncio
+async def test_start_worldcup_abandons_previous_in_progress_session(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """새 월드컵 시작 시 기존 진행 중 세션은 ABANDONED 처리됩니다."""
+    await _insert_test_user(async_session)
+    await _insert_movies_for_worldcup(async_session)
+
+    first_resp = await client.post(
+        "/api/v1/onboarding/worldcup/start",
+        json={
+            "sourceType": "GENRE",
+            "selectedGenres": ["액션"],
+            "roundSize": 16,
+        },
+    )
+    assert first_resp.status_code == 200
+
+    second_resp = await client.post(
+        "/api/v1/onboarding/worldcup/start",
+        json={
+            "sourceType": "GENRE",
+            "selectedGenres": ["액션"],
+            "roundSize": 8,
+        },
+    )
+    assert second_resp.status_code == 200
+
+    session_rows = await async_session.execute(
+        select(WorldcupSession)
+        .where(WorldcupSession.user_id == TEST_USER_ID)
+        .order_by(WorldcupSession.session_id.asc())
+    )
+    sessions = list(session_rows.scalars().all())
+    assert len(sessions) == 2
+    assert sessions[0].status == "ABANDONED"
+    assert sessions[1].status == "IN_PROGRESS"
+    assert sessions[1].current_round == 8
 
 
 @pytest.mark.asyncio
@@ -342,6 +412,25 @@ async def test_worldcup_full_flow(client: AsyncClient, async_session: AsyncSessi
     round_data = round_resp.json()
     assert round_data["next_round"] == 8
 
+    session_result = await async_session.execute(
+        select(WorldcupSession).where(WorldcupSession.user_id == TEST_USER_ID)
+    )
+    saved_session = session_result.scalar_one()
+    assert saved_session.current_round == 8
+    assert saved_session.status == "IN_PROGRESS"
+
+    match_result = await async_session.execute(
+        select(WorldcupMatch)
+        .where(WorldcupMatch.session_id == saved_session.session_id)
+        .order_by(WorldcupMatch.round_number.desc(), WorldcupMatch.match_order.asc())
+    )
+    saved_matches = list(match_result.scalars().all())
+    round_16_matches = [match for match in saved_matches if match.round_number == 16]
+    round_8_matches = [match for match in saved_matches if match.round_number == 8]
+    assert len(round_16_matches) == 8
+    assert len(round_8_matches) == 4
+    assert all(match.winner_movie_id is not None for match in round_16_matches)
+
     # 3. 8강 진행
     selections_8 = [m["movie_a"]["movie_id"] for m in round_data["next_matches"]]
     round_resp = await client.post(
@@ -355,6 +444,10 @@ async def test_worldcup_full_flow(client: AsyncClient, async_session: AsyncSessi
     assert round_resp.status_code == 200
     round_data = round_resp.json()
     assert round_data["next_round"] == 4
+
+    await async_session.refresh(saved_session)
+    assert saved_session.current_round == 4
+    assert saved_session.status == "IN_PROGRESS"
 
     # 4. 4강 진행
     selections_4 = [m["movie_a"]["movie_id"] for m in round_data["next_matches"]]
@@ -370,6 +463,10 @@ async def test_worldcup_full_flow(client: AsyncClient, async_session: AsyncSessi
     round_data = round_resp.json()
     assert round_data["next_round"] == 2
 
+    await async_session.refresh(saved_session)
+    assert saved_session.current_round == 2
+    assert saved_session.status == "IN_PROGRESS"
+
     # 5. 결승 진행
     final_selection = [round_data["next_matches"][0]["movie_a"]["movie_id"]]
     final_resp = await client.post(
@@ -384,6 +481,20 @@ async def test_worldcup_full_flow(client: AsyncClient, async_session: AsyncSessi
     final_data = final_resp.json()
     assert final_data["next_round"] is None  # 월드컵 종료
 
+    await async_session.refresh(saved_session)
+    assert saved_session.status == "COMPLETED"
+    assert saved_session.winner_movie_id == final_selection[0]
+    assert saved_session.completed_at is not None
+
+    final_match_result = await async_session.execute(
+        select(WorldcupMatch)
+        .where(WorldcupMatch.session_id == saved_session.session_id)
+        .order_by(WorldcupMatch.round_number.asc(), WorldcupMatch.match_order.asc())
+    )
+    final_matches = list(final_match_result.scalars().all())
+    assert len(final_matches) == 15
+    assert all(match.winner_movie_id is not None for match in final_matches)
+
     # 6. 결과 확인
     result_resp = await client.get("/api/v1/onboarding/worldcup/result")
     assert result_resp.status_code == 200
@@ -393,6 +504,15 @@ async def test_worldcup_full_flow(client: AsyncClient, async_session: AsyncSessi
     assert "genre_preferences" in result
     assert "top_genres" in result
     assert len(result["top_genres"]) > 0
+
+    result_row = await async_session.execute(
+        select(WorldcupResult)
+        .where(WorldcupResult.user_id == TEST_USER_ID)
+        .order_by(WorldcupResult.created_at.desc())
+        .limit(1)
+    )
+    saved_result = result_row.scalar_one()
+    assert saved_result.session_id == saved_session.session_id
 
 
 # =========================================
