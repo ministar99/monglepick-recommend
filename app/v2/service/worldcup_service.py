@@ -53,7 +53,7 @@ ROUND_WEIGHTS: dict[int, float] = {
 }
 MIN_GENRE_VOTE_COUNT = 100
 SUPPORTED_ROUND_SIZES = (64, 32, 16, 8)
-EXCLUDED_CUSTOM_GENRES = ("에로", "동성애", "반공/분단", "계몽")
+EXCLUDED_CUSTOM_GENRES = ("에로", "동성애", "반공/분단", "계몽", "코메디")
 
 
 @dataclass(frozen=True)
