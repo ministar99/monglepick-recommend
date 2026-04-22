@@ -12,6 +12,7 @@ test
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,8 +43,7 @@ class MovieBrief(BaseModel):
     trailer_url: str | None = Field(default=None, description="예고편 URL")
     overview: str | None = Field(default=None, description="줄거리 요약")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class MovieDetailResponse(BaseModel):
@@ -228,6 +228,57 @@ class GenreSelectionResponse(BaseModel):
     selected_genres: list[str] = Field(description="저장된 장르 목록")
 
 
+class WorldcupSourceType(str, Enum):
+    """월드컵 후보 산정 방식"""
+    CATEGORY = "CATEGORY"
+    GENRE = "GENRE"
+
+
+class WorldcupCategoryOptionResponse(BaseModel):
+    """사용자에게 노출할 월드컵 카테고리 옵션"""
+    categoryId: int = Field(description="월드컵 카테고리 ID")
+    categoryCode: str = Field(description="카테고리 코드")
+    categoryName: str = Field(description="카테고리 이름")
+    description: str | None = Field(default=None, description="카테고리 설명")
+    displayOrder: int = Field(default=0, description="노출 순서")
+    candidatePoolSize: int = Field(description="활성 후보 영화 수")
+    availableRoundSizes: list[int] = Field(description="선택 가능한 라운드 크기")
+    previewMovieId: str | None = Field(default=None, description="카드 미리보기 영화 ID")
+    previewPosterUrl: str | None = Field(default=None, description="카드 미리보기 포스터 URL")
+    isReady: bool = Field(description="16강 이상 진행 가능한지 여부")
+
+
+class WorldcupGenreOptionResponse(BaseModel):
+    """커스텀 월드컵 빌더용 장르 옵션"""
+    genreCode: str = Field(description="장르 코드")
+    genreName: str = Field(description="장르명")
+    contentsCount: int = Field(description="해당 장르 컨텐츠 수")
+
+
+class WorldcupStartOptionsRequest(BaseModel):
+    """월드컵 시작 전 후보 풀과 가능 라운드 계산 요청"""
+    sourceType: WorldcupSourceType = Field(description="시작 방식 (CATEGORY / GENRE)")
+    categoryId: int | None = Field(default=None, description="카테고리 ID (CATEGORY일 때 사용)")
+    selectedGenres: list[str] | None = Field(default=None, description="선택 장르 목록 (GENRE일 때 사용)")
+
+
+class WorldcupStartOptionsResponse(BaseModel):
+    """월드컵 시작 전 후보 풀과 가능 라운드 계산 응답"""
+    sourceType: WorldcupSourceType = Field(description="시작 방식")
+    categoryId: int | None = Field(default=None, description="카테고리 ID")
+    selectedGenres: list[str] = Field(default_factory=list, description="선택 장르 목록")
+    candidatePoolSize: int = Field(description="후보 풀 크기")
+    availableRoundSizes: list[int] = Field(description="선택 가능한 라운드 크기")
+
+
+class WorldcupStartRequest(BaseModel):
+    """월드컵 시작 요청"""
+    sourceType: WorldcupSourceType = Field(description="시작 방식 (CATEGORY / GENRE)")
+    categoryId: int | None = Field(default=None, description="카테고리 ID (CATEGORY일 때 사용)")
+    selectedGenres: list[str] | None = Field(default=None, description="선택 장르 목록 (GENRE일 때 사용)")
+    roundSize: int = Field(description="라운드 크기 (8/16/32/64)")
+
+
 class WorldcupCandidate(BaseModel):
     """월드컵 대진표의 개별 영화 후보"""
     movie: MovieBrief = Field(description="영화 정보")
@@ -245,10 +296,10 @@ class WorldcupBracketResponse(BaseModel):
     """
     월드컵 대진표 응답
 
-    선택한 장르 기반으로 16강 또는 32강 영화 후보를 생성합니다.
+    카테고리 또는 장르 기반으로 8강/16강/32강/64강 후보를 생성합니다.
     각 매치는 2개 영화의 대결로 구성됩니다.
     """
-    round_size: int = Field(description="라운드 크기 (16 또는 32)")
+    round_size: int = Field(description="라운드 크기 (8/16/32/64)")
     matches: list[WorldcupMatch] = Field(description="매치 목록")
     total_rounds: int = Field(description="총 진행 라운드 수 (예: 16강→8강→4강→결승 = 4)")
 

@@ -14,7 +14,7 @@ import json
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class MovieDTO(BaseModel):
@@ -59,9 +59,7 @@ class MovieDTO(BaseModel):
     # 데이터 출처
     source: Optional[str] = None
 
-    class Config:
-        # DictCursor 결과(dict)에서 직접 생성 허용
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
     def get_genres_list(self) -> list[str]:
         """JSON 장르를 파이썬 리스트로 변환합니다."""
@@ -100,7 +98,7 @@ class UserPreferenceDTO(BaseModel):
     user_preferences 테이블의 DictCursor 결과를 매핑합니다.
     JSON 컬럼(preferred_genres, preferred_moods 등)은 문자열→리스트 변환합니다.
     """
-    id: int
+    id: int | None = None
     user_id: str
     preferred_genres: Any = None
     preferred_moods: Any = None
@@ -112,8 +110,7 @@ class UserPreferenceDTO(BaseModel):
     preferred_certification: Optional[str] = None
     extra_preferences: Any = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
     def get_genres_list(self) -> list[str]:
         """preferred_genres JSON을 리스트로 변환합니다."""
@@ -141,8 +138,7 @@ class SearchHistoryDTO(BaseModel):
     clicked_movie_id: Optional[str] = None
     filters: Any = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TrendingKeywordDTO(BaseModel):
@@ -156,8 +152,7 @@ class TrendingKeywordDTO(BaseModel):
     search_count: int
     last_searched_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LikeDTO(BaseModel):
@@ -191,8 +186,7 @@ class LikeDTO(BaseModel):
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
     def is_active(self) -> bool:
         """활성 좋아요 여부 판정 (deleted_at IS NULL)."""
@@ -206,7 +200,9 @@ class WorldcupResultDTO(BaseModel):
     worldcup_results 테이블의 DictCursor 결과를 매핑합니다.
     JSON 컬럼(semi_final_movie_ids, selection_log, genre_preferences)은 문자열로 저장됩니다.
     """
-    id: int
+    worldcup_result_id: int = Field(
+        validation_alias=AliasChoices("worldcup_result_id", "id"),
+    )
     user_id: str
     round_size: int
     winner_movie_id: str
@@ -215,10 +211,20 @@ class WorldcupResultDTO(BaseModel):
     selection_log: Optional[str] = None           # JSON 문자열
     genre_preferences: Optional[str] = None       # JSON 문자열
     onboarding_completed: bool = False
+    session_id: Optional[int] = None
+    reward_granted: bool = False
+    total_matches: Optional[int] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+    @property
+    def id(self) -> int:
+        """구버전 코드 호환용 별칭."""
+        return self.worldcup_result_id
 
 
 # ─────────────────────────────────────────
