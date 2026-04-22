@@ -33,8 +33,10 @@ from app.model.schema import (
     WorldcupStartRequest,
 )
 from app.v2.model.dto import MovieDTO
+from app.v2.repository.worldcup_match_repository import WorldcupMatchRepository
 from app.v2.repository.movie_repository import MovieRepository
 from app.v2.repository.user_preference_repository import UserPreferenceRepository
+from app.v2.repository.worldcup_session_repository import WorldcupSessionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,7 @@ ROUND_WEIGHTS: dict[int, float] = {
 }
 MIN_GENRE_VOTE_COUNT = 100
 SUPPORTED_ROUND_SIZES = (64, 32, 16, 8)
-EXCLUDED_CUSTOM_GENRES = ("에로", "동성애", "반공/분단", "계몽")
+EXCLUDED_CUSTOM_GENRES = ("에로", "동성애", "반공/분단", "계몽", "코메디")
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,9 @@ class WorldcupService:
         self._redis = redis_client
         self._settings = get_settings()
         self._movie_repo = MovieRepository(conn)
+        self._match_repo = WorldcupMatchRepository(conn)
         self._pref_repo = UserPreferenceRepository(conn)
+        self._session_repo = WorldcupSessionRepository(conn)
 
     async def get_available_categories(self) -> list[WorldcupCategoryOptionResponse]:
         """사용자에게 노출할 활성 월드컵 카테고리 목록을 반환합니다."""
@@ -223,8 +227,23 @@ class WorldcupService:
                 f"월드컵 후보 영화 조회가 완전하지 않습니다. 요청={round_size}, 실제={len(movies)}"
             )
 
+        await self._session_repo.abandon_in_progress_sessions(user_id)
+        worldcup_session = await self._session_repo.create_session(
+            user_id=user_id,
+            source_type=pool_info.source_type,
+            category_id=pool_info.category_id,
+            selected_genres=pool_info.selected_genres,
+            candidate_pool_size=pool_info.candidate_pool_size,
+            round_size=round_size,
+        )
+        match_rows = await self._match_repo.create_matches(
+            session_id=worldcup_session.session_id,
+            round_number=round_size,
+            candidate_ids=candidate_ids,
+        )
         await self._store_worldcup_state(
             user_id=user_id,
+            session_id=worldcup_session.session_id,
             round_size=round_size,
             candidate_ids=candidate_ids,
             source_type=pool_info.source_type,
@@ -232,7 +251,7 @@ class WorldcupService:
             selected_genres=pool_info.selected_genres,
             candidate_pool_size=pool_info.candidate_pool_size,
         )
-        return self._build_bracket_response(movies, round_size)
+        return self._build_bracket_response_from_records(match_rows, movies, round_size)
 
     async def submit_round(
         self, user_id: str, request: WorldcupSelectionRequest
@@ -252,6 +271,9 @@ class WorldcupService:
             state = await self._redis.hgetall(redis_key)
         except Exception:
             state = {}
+        session_id = self._parse_session_id(state)
+        if session_id is not None:
+            await self._match_repo.select_round_winners(session_id, current_round, selected_ids)
 
         # 선택 로그 갱신
         selection_log: list[dict] = []
@@ -296,7 +318,10 @@ class WorldcupService:
                 semi_final_movie_ids=None,
                 selection_log={"rounds": selection_log},
                 genre_preferences=genre_prefs,
+                session_id=session_id,
             )
+            if session_id is not None:
+                await self._session_repo.complete_session(session_id, winner_id)
 
             # 분석된 장르 선호도를 user_preferences에도 반영
             top_genres = sorted(genre_prefs, key=genre_prefs.get, reverse=True)[:5]
@@ -326,15 +351,15 @@ class WorldcupService:
         movie_dict = {m.movie_id: m for m in selected_movies}
         ordered_movies = [movie_dict[mid] for mid in selected_ids if mid in movie_dict]
 
-        next_matches: list[WorldcupMatch] = []
-        for i in range(0, len(ordered_movies), 2):
-            if i + 1 < len(ordered_movies):
-                match = WorldcupMatch(
-                    match_id=i // 2 + 1,
-                    movie_a=self._to_movie_brief(ordered_movies[i]),
-                    movie_b=self._to_movie_brief(ordered_movies[i + 1]),
-                )
-                next_matches.append(match)
+        if session_id is not None:
+            next_match_rows = await self._match_repo.create_matches(
+                session_id=session_id,
+                round_number=next_round,
+                candidate_ids=selected_ids,
+            )
+            next_matches = self._to_match_responses(next_match_rows, ordered_movies)
+        else:
+            next_matches = self._build_match_pairs_without_persistence(ordered_movies)
 
         # Redis 상태 갱신
         try:
@@ -347,6 +372,8 @@ class WorldcupService:
             await self._redis.expire(redis_key, 3600)
         except Exception as e:
             logger.warning(f"Redis 월드컵 상태 갱신 실패: {e}")
+        if session_id is not None:
+            await self._session_repo.advance_round(session_id, next_round)
 
         return WorldcupSelectionResponse(
             message=f"{next_round}강 대진표가 준비되었습니다.",
@@ -538,6 +565,7 @@ class WorldcupService:
     async def _store_worldcup_state(
         self,
         user_id: str,
+        session_id: int,
         round_size: int,
         candidate_ids: list[str],
         source_type: WorldcupSourceType,
@@ -546,6 +574,7 @@ class WorldcupService:
         candidate_pool_size: int,
     ) -> None:
         state = {
+            "session_id": session_id,
             "round_size": round_size,
             "candidates": json.dumps(candidate_ids),
             "selection_log": json.dumps([]),
@@ -561,6 +590,17 @@ class WorldcupService:
             await self._redis.expire(redis_key, 3600)
         except Exception as e:
             logger.warning(f"Redis 월드컵 상태 저장 실패: {e}")
+
+    def _parse_session_id(self, state: dict[str, str]) -> int | None:
+        """Redis 상태에서 session_id를 안전하게 추출합니다."""
+        raw_session_id = state.get("session_id") if state else None
+        if raw_session_id in (None, ""):
+            return None
+        try:
+            return int(raw_session_id)
+        except (TypeError, ValueError):
+            logger.warning("유효하지 않은 worldcup session_id 상태값: %s", raw_session_id)
+            return None
 
     def _build_bracket_response(
         self,
@@ -588,12 +628,34 @@ class WorldcupService:
             total_rounds=total_rounds,
         )
 
+    def _build_bracket_response_from_records(
+        self,
+        match_rows: list[dict],
+        movies: list[MovieDTO],
+        round_size: int,
+    ) -> WorldcupBracketResponse:
+        """저장된 매치 row 기준으로 브래킷 응답을 구성합니다."""
+        matches = self._to_match_responses(match_rows, movies)
+        return WorldcupBracketResponse(
+            round_size=round_size,
+            matches=matches,
+            total_rounds=self._compute_total_rounds(round_size),
+        )
+
     def _compute_available_round_sizes(self, candidate_pool_size: int) -> list[int]:
         return [
             round_size
             for round_size in SUPPORTED_ROUND_SIZES
             if candidate_pool_size >= round_size
         ]
+
+    def _compute_total_rounds(self, round_size: int) -> int:
+        total_rounds = 0
+        current_round = round_size
+        while current_round > 1:
+            current_round //= 2
+            total_rounds += 1
+        return total_rounds
 
     def _normalize_genres(self, genres: list[str] | None) -> list[str]:
         if not genres:
@@ -634,6 +696,45 @@ class WorldcupService:
                 break
 
         return prioritized_ids[:round_size]
+
+    def _to_match_responses(
+        self,
+        match_rows: list[dict],
+        movies: list[MovieDTO],
+    ) -> list[WorldcupMatch]:
+        """DB 매치 row와 영화 DTO를 API 응답용 매치로 변환합니다."""
+        movie_map = {movie.movie_id: movie for movie in movies}
+        matches: list[WorldcupMatch] = []
+        for row in sorted(match_rows, key=lambda item: item["match_order"]):
+            movie_a = movie_map.get(row["movie_a_id"])
+            movie_b = movie_map.get(row["movie_b_id"])
+            if not movie_a or not movie_b:
+                continue
+            matches.append(
+                WorldcupMatch(
+                    match_id=row["match_id"],
+                    movie_a=self._to_movie_brief(movie_a),
+                    movie_b=self._to_movie_brief(movie_b),
+                )
+            )
+        return matches
+
+    def _build_match_pairs_without_persistence(
+        self,
+        movies: list[MovieDTO],
+    ) -> list[WorldcupMatch]:
+        """세션 ID가 없을 때만 사용하는 임시 매치 응답 생성기."""
+        matches: list[WorldcupMatch] = []
+        for i in range(0, len(movies), 2):
+            if i + 1 < len(movies):
+                matches.append(
+                    WorldcupMatch(
+                        match_id=i // 2 + 1,
+                        movie_a=self._to_movie_brief(movies[i]),
+                        movie_b=self._to_movie_brief(movies[i + 1]),
+                    )
+                )
+        return matches
 
     async def _analyze_preferences(
         self, selection_log: list[dict]

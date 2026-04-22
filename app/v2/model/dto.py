@@ -11,7 +11,7 @@ DDL 기준: Backend JPA 엔티티 (ddl-auto=update, 진실 원본)
 """
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
@@ -51,7 +51,7 @@ class MovieDTO(BaseModel):
     audience_count: Optional[int] = None
     screen_count: Optional[int] = None
     kobis_watch_grade: Optional[str] = None
-    kobis_open_dt: Optional[str] = None
+    kobis_open_dt: Optional[date | datetime | str] = None
     # KMDb 보강 컬럼
     kmdb_id: Optional[str] = None
     awards: Optional[str] = None
@@ -225,6 +225,34 @@ class WorldcupResultDTO(BaseModel):
     def id(self) -> int:
         """구버전 코드 호환용 별칭."""
         return self.worldcup_result_id
+
+
+class WorldcupSessionDTO(BaseModel):
+    """
+    이상형 월드컵 세션 DTO
+
+    worldcup_session 테이블의 DictCursor 결과를 매핑합니다.
+    """
+    session_id: int
+    user_id: str
+    source_type: str
+    category_id: Optional[int] = None
+    selected_genres_json: Optional[str] = None
+    candidate_pool_size: int
+    round_size: int
+    current_round: int
+    current_match_order: int = 0
+    status: str
+    winner_movie_id: Optional[str] = None
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    reward_granted: bool = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ─────────────────────────────────────────
