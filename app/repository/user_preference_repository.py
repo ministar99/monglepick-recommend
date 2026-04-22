@@ -137,6 +137,7 @@ class UserPreferenceRepository:
         semi_final_movie_ids: list[str] | None,
         selection_log: dict | None,
         genre_preferences: dict[str, float] | None,
+        session_id: int | None = None,
     ) -> WorldcupResult:
         """
         월드컵 결과를 저장합니다.
@@ -153,6 +154,7 @@ class UserPreferenceRepository:
         Returns:
             저장된 WorldcupResult 엔티티
         """
+        now = datetime.now(timezone.utc)
         worldcup = WorldcupResult(
             user_id=user_id,
             round_size=round_size,
@@ -170,7 +172,11 @@ class UserPreferenceRepository:
                 else None
             ),
             onboarding_completed=True,
-            created_at=datetime.now(timezone.utc),
+            session_id=session_id,
+            reward_granted=False,
+            total_matches=max(round_size - 1, 0),
+            created_at=now,
+            updated_at=now,
         )
         self._session.add(worldcup)
         await self._session.flush()

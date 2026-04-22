@@ -394,8 +394,8 @@ class ElasticsearchSearchClient:
         year_to: int | None,
         rating_min: float | None,
         rating_max: float | None,
-        popularity_min: float | None,
-        popularity_max: float | None,
+        popularity_min: float | None = None,
+        popularity_max: float | None = None,
         vote_count_min: int | None,
         capabilities: ESIndexCapabilities,
     ) -> dict:

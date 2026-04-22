@@ -42,6 +42,7 @@ from app.config import get_settings
 from app.core.database import Base
 from app.main import app
 from app.api.deps import get_db, get_redis_client, get_current_user, get_current_user_optional
+from app.search_elasticsearch import ElasticsearchSearchClient
 
 
 # ─────────────────────────────────────────
@@ -387,6 +388,26 @@ async def async_session() -> AsyncGenerator[AsyncSession, None]:
 def fake_redis() -> FakeRedis:
     """테스트용 FakeRedis 인스턴스를 반환합니다."""
     return FakeRedis()
+
+
+@pytest.fixture(autouse=True)
+def disable_elasticsearch_for_tests():
+    """
+    검색 API 테스트는 외부 ES 인덱스 대신 인메모리 SQLite 기준으로 검증합니다.
+
+    로컬 ES가 떠 있으면 테스트 DB가 아닌 실인덱스를 조회해 결과가 흔들리므로
+    전체 테스트 동안 ES 검색 경로를 기본 비활성화합니다.
+    """
+    settings = get_settings()
+    original_enabled = settings.SEARCH_ES_ENABLED
+    original_url = settings.ELASTICSEARCH_URL
+    settings.SEARCH_ES_ENABLED = False
+    settings.ELASTICSEARCH_URL = None
+    ElasticsearchSearchClient._shared_capabilities.clear()
+    yield
+    settings.SEARCH_ES_ENABLED = original_enabled
+    settings.ELASTICSEARCH_URL = original_url
+    ElasticsearchSearchClient._shared_capabilities.clear()
 
 
 @pytest_asyncio.fixture

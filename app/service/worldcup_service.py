@@ -25,20 +25,29 @@ REQ_018: 월드컵 결과 → 장르 선호도 분석 (레이더 차트)
 
 import json
 import logging
+import random
 from collections import Counter
+from dataclasses import dataclass
 
+from sqlalchemy import bindparam, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.model.entity import Movie
+from app.model.entity import Movie, WorldcupCandidate, WorldcupCategory
 from app.model.schema import (
     GenrePreference,
     MovieBrief,
     WorldcupBracketResponse,
+    WorldcupCategoryOptionResponse,
+    WorldcupGenreOptionResponse,
     WorldcupMatch,
     WorldcupResultResponse,
     WorldcupSelectionRequest,
     WorldcupSelectionResponse,
+    WorldcupSourceType,
+    WorldcupStartOptionsRequest,
+    WorldcupStartOptionsResponse,
+    WorldcupStartRequest,
 )
 from app.repository.movie_repository import MovieRepository
 from app.repository.user_preference_repository import UserPreferenceRepository
@@ -52,12 +61,24 @@ logger = logging.getLogger(__name__)
 # 16강=1, 8강=2, 4강=3, 결승=4
 # ─────────────────────────────────────────
 ROUND_WEIGHTS: dict[int, float] = {
+    64: 1.0,
     32: 1.0,
     16: 1.0,
     8: 2.0,
     4: 3.0,
     2: 4.0,
 }
+MIN_GENRE_VOTE_COUNT = 100
+SUPPORTED_ROUND_SIZES = (64, 32, 16, 8)
+EXCLUDED_CUSTOM_GENRES = ("에로", "동성애", "반공/분단", "계몽")
+
+
+@dataclass(frozen=True)
+class CandidatePoolInfo:
+    source_type: WorldcupSourceType
+    category_id: int | None
+    selected_genres: list[str]
+    candidate_pool_size: int
 
 
 class WorldcupService:
@@ -80,106 +101,155 @@ class WorldcupService:
         self._movie_repo = MovieRepository(session)
         self._pref_repo = UserPreferenceRepository(session)
 
-    async def generate_bracket(
-        self, user_id: str, round_size: int = 16
+    async def get_available_categories(self) -> list[WorldcupCategoryOptionResponse]:
+        """사용자에게 노출할 활성 월드컵 카테고리 목록을 반환합니다."""
+        result = await self._session.execute(
+            select(WorldcupCategory)
+            .where(WorldcupCategory.is_enabled.is_(True))
+            .order_by(WorldcupCategory.display_order.desc(), WorldcupCategory.category_name.asc())
+        )
+        categories = list(result.scalars().all())
+
+        responses: list[WorldcupCategoryOptionResponse] = []
+        for category in categories:
+            candidate_pool_size = await self._count_active_candidates_by_category(category.category_id)
+            preview_movie_id, preview_poster_url = await self._resolve_category_preview(
+                category.category_id
+            )
+            responses.append(
+                WorldcupCategoryOptionResponse(
+                    categoryId=category.category_id,
+                    categoryCode=category.category_code,
+                    categoryName=category.category_name,
+                    description=category.description,
+                    displayOrder=category.display_order,
+                    candidatePoolSize=candidate_pool_size,
+                    availableRoundSizes=self._compute_available_round_sizes(candidate_pool_size),
+                    previewMovieId=preview_movie_id,
+                    previewPosterUrl=preview_poster_url,
+                    isReady=candidate_pool_size >= 16,
+                )
+            )
+        return responses
+
+    async def get_available_genres(self) -> list[WorldcupGenreOptionResponse]:
+        """커스텀 월드컵 빌더용 장르 목록을 반환합니다."""
+        stmt = text(
+            """
+            SELECT genre_code, genre_name, contents_count
+            FROM genre_master
+            WHERE contents_count > :minimum_count
+              AND genre_name NOT IN :excluded_names
+            ORDER BY contents_count DESC, genre_name ASC
+            """
+        ).bindparams(
+            bindparam("minimum_count", value=MIN_GENRE_VOTE_COUNT),
+            bindparam("excluded_names", value=list(EXCLUDED_CUSTOM_GENRES), expanding=True),
+        )
+        result = await self._session.execute(stmt)
+        rows = result.mappings().all()
+        return [
+            WorldcupGenreOptionResponse(
+                genreCode=row["genre_code"],
+                genreName=row["genre_name"],
+                contentsCount=row["contents_count"],
+            )
+            for row in rows
+        ]
+
+    async def _resolve_category_preview(
+        self,
+        category_id: int,
+    ) -> tuple[str | None, str | None]:
+        """카테고리 카드에 사용할 대표 포스터 1장을 무작위로 조회합니다."""
+        random_func = self._random_function()
+        result = await self._session.execute(
+            select(Movie.movie_id, Movie.poster_path)
+            .join(WorldcupCandidate, WorldcupCandidate.movie_id == Movie.movie_id)
+            .where(
+                WorldcupCandidate.category_id == category_id,
+                WorldcupCandidate.is_active.is_(True),
+                Movie.poster_path.isnot(None),
+            )
+            .order_by(random_func)
+            .limit(1)
+        )
+        row = result.first()
+        if row is None:
+            return None, None
+
+        movie_id, poster_path = row
+        poster_url = (
+            f"{self._settings.TMDB_IMAGE_BASE_URL}{poster_path}"
+            if poster_path
+            else None
+        )
+        return movie_id, poster_url
+
+    async def get_start_options(
+        self, request: WorldcupStartOptionsRequest
+    ) -> WorldcupStartOptionsResponse:
+        """시작 조건에 따른 후보 풀 크기와 가능 라운드 목록을 반환합니다."""
+        pool_info = await self._resolve_candidate_pool_info(
+            request.sourceType,
+            request.categoryId,
+            request.selectedGenres,
+        )
+        return WorldcupStartOptionsResponse(
+            sourceType=pool_info.source_type,
+            categoryId=pool_info.category_id,
+            selectedGenres=pool_info.selected_genres,
+            candidatePoolSize=pool_info.candidate_pool_size,
+            availableRoundSizes=self._compute_available_round_sizes(pool_info.candidate_pool_size),
+        )
+
+    async def start_worldcup(
+        self, user_id: str, request: WorldcupStartRequest
     ) -> WorldcupBracketResponse:
-        """
-        월드컵 대진표를 생성합니다.
+        """새 월드컵 시작 요청으로 대진표를 생성합니다."""
+        round_size = request.roundSize
+        if round_size not in SUPPORTED_ROUND_SIZES:
+            raise ValueError(f"지원하지 않는 라운드 크기입니다: {round_size}")
 
-        사용자가 1단계에서 선택한 장르를 기반으로
-        영화 후보를 랜덤 선택하고 대진표를 구성합니다.
+        pool_info = await self._resolve_candidate_pool_info(
+            request.sourceType,
+            request.categoryId,
+            request.selectedGenres,
+        )
+        available_round_sizes = self._compute_available_round_sizes(pool_info.candidate_pool_size)
+        if round_size not in available_round_sizes:
+            raise ValueError(
+                f"선택한 조건으로는 {round_size}강을 시작할 수 없습니다. "
+                f"가능 라운드: {available_round_sizes}"
+            )
 
-        Args:
-            user_id: 사용자 ID
-            round_size: 라운드 크기 (16 또는 32)
-
-        Returns:
-            WorldcupBracketResponse: 대진표 (매치 목록)
-
-        Raises:
-            ValueError: round_size가 16 또는 32가 아닌 경우
-        """
-        if round_size not in (16, 32):
-            raise ValueError(f"라운드 크기는 16 또는 32만 가능합니다: {round_size}")
-
-        # ─────────────────────────────────────
-        # 사용자의 선호 장르 조회 (1단계에서 저장한 것)
-        # ─────────────────────────────────────
-        pref = await self._pref_repo.get_by_user_id(user_id)
-        if pref and pref.preferred_genres:
-            # JSON 컬럼: SQLAlchemy가 자동으로 파이썬 리스트로 디시리얼라이즈
-            if isinstance(pref.preferred_genres, list):
-                selected_genres = pref.preferred_genres
-            else:
-                try:
-                    selected_genres = json.loads(pref.preferred_genres)
-                except (json.JSONDecodeError, TypeError):
-                    selected_genres = ["액션", "드라마", "코미디"]  # 폴백 장르
+        if pool_info.source_type == WorldcupSourceType.CATEGORY:
+            candidate_ids = await self._resolve_category_candidate_movie_ids(
+                pool_info.category_id,
+                round_size,
+            )
         else:
-            # 장르 선택을 건너뛴 경우 기본 장르 사용
-            selected_genres = ["액션", "드라마", "코미디"]
-
-        # ─────────────────────────────────────
-        # 영화 후보 랜덤 선택
-        # ─────────────────────────────────────
-        movies = await self._movie_repo.find_random_by_genres(
-            genres=selected_genres,
-            count=round_size,
-            min_rating=5.0,
-        )
-
-        if len(movies) < round_size:
-            logger.warning(
-                f"월드컵 후보 부족: 요청={round_size}, 실제={len(movies)}. "
-                f"가용 영화 수로 조정합니다."
+            candidate_ids = await self._resolve_genre_candidate_movie_ids(
+                pool_info.selected_genres,
+                round_size,
             )
-            # 2의 거듭제곱으로 내림 (16, 8, 4, ...)
-            actual_size = 1
-            while actual_size * 2 <= len(movies):
-                actual_size *= 2
-            movies = movies[:actual_size]
-            round_size = actual_size
 
-        # ─────────────────────────────────────
-        # 대진표 매치 구성 (2개씩 짝지어 매치 생성)
-        # ─────────────────────────────────────
-        matches: list[WorldcupMatch] = []
-        for i in range(0, len(movies), 2):
-            match = WorldcupMatch(
-                match_id=i // 2 + 1,
-                movie_a=self._to_movie_brief(movies[i]),
-                movie_b=self._to_movie_brief(movies[i + 1]),
+        movies = await self._fetch_movies_by_ids(candidate_ids)
+        if len(movies) != round_size:
+            raise ValueError(
+                f"월드컵 후보 영화 조회가 완전하지 않습니다. 요청={round_size}, 실제={len(movies)}"
             )
-            matches.append(match)
 
-        # ─────────────────────────────────────
-        # Redis에 월드컵 진행 상태 저장 (TTL 1시간)
-        # ─────────────────────────────────────
-        state = {
-            "round_size": round_size,
-            "candidates": json.dumps([m.movie_id for m in movies]),
-            "selection_log": json.dumps([]),
-            "current_round": round_size,
-        }
-        redis_key = f"{self.REDIS_KEY_PREFIX}{user_id}"
-        try:
-            await self._redis.hset(redis_key, mapping=state)
-            await self._redis.expire(redis_key, 3600)  # 1시간 TTL
-        except Exception as e:
-            logger.warning(f"Redis 월드컵 상태 저장 실패: {e}")
-
-        # 총 라운드 수 계산 (예: 16강 → 4라운드)
-        total_rounds = 0
-        r = round_size
-        while r > 1:
-            r //= 2
-            total_rounds += 1
-
-        return WorldcupBracketResponse(
+        await self._store_worldcup_state(
+            user_id=user_id,
             round_size=round_size,
-            matches=matches,
-            total_rounds=total_rounds,
+            candidate_ids=candidate_ids,
+            source_type=pool_info.source_type,
+            category_id=pool_info.category_id,
+            selected_genres=pool_info.selected_genres,
+            candidate_pool_size=pool_info.candidate_pool_size,
         )
+        return self._build_bracket_response(movies, round_size)
 
     async def submit_round(
         self, user_id: str, request: WorldcupSelectionRequest
@@ -380,6 +450,236 @@ class WorldcupService:
             genre_preferences=genre_preferences,
             top_genres=top_genres,
         )
+
+    async def _resolve_candidate_pool_info(
+        self,
+        source_type: WorldcupSourceType,
+        category_id: int | None,
+        selected_genres: list[str] | None,
+    ) -> CandidatePoolInfo:
+        """시작 방식에 맞는 후보 풀 정보를 계산합니다."""
+        if source_type == WorldcupSourceType.CATEGORY:
+            if category_id is None:
+                raise ValueError("카테고리 기반 월드컵은 categoryId가 필요합니다.")
+
+            result = await self._session.execute(
+                select(WorldcupCategory).where(
+                    WorldcupCategory.category_id == category_id,
+                    WorldcupCategory.is_enabled.is_(True),
+                )
+            )
+            category = result.scalar_one_or_none()
+            if category is None:
+                raise ValueError(f"사용 가능한 월드컵 카테고리를 찾을 수 없습니다: {category_id}")
+
+            candidate_pool_size = await self._count_active_candidates_by_category(category_id)
+            return CandidatePoolInfo(
+                source_type=source_type,
+                category_id=category_id,
+                selected_genres=[],
+                candidate_pool_size=candidate_pool_size,
+            )
+
+        if source_type == WorldcupSourceType.GENRE:
+            normalized_genres = self._normalize_genres(selected_genres)
+            if not normalized_genres:
+                raise ValueError("장르 기반 월드컵은 최소 1개 장르를 선택해야 합니다.")
+
+            candidate_pool_size = await self._count_eligible_movies_by_selected_genres(
+                normalized_genres
+            )
+            return CandidatePoolInfo(
+                source_type=source_type,
+                category_id=None,
+                selected_genres=normalized_genres,
+                candidate_pool_size=candidate_pool_size,
+            )
+
+        raise ValueError(f"지원하지 않는 월드컵 시작 방식입니다: {source_type}")
+
+    async def _count_active_candidates_by_category(self, category_id: int) -> int:
+        result = await self._session.execute(
+            select(func.count(WorldcupCandidate.id)).where(
+                WorldcupCandidate.category_id == category_id,
+                WorldcupCandidate.is_active.is_(True),
+            )
+        )
+        return int(result.scalar() or 0)
+
+    async def _resolve_category_candidate_movie_ids(
+        self,
+        category_id: int | None,
+        round_size: int,
+    ) -> list[str]:
+        if category_id is None:
+            raise ValueError("카테고리 기반 월드컵은 categoryId가 필요합니다.")
+
+        random_func = self._random_function()
+        result = await self._session.execute(
+            select(WorldcupCandidate.movie_id)
+            .where(
+                WorldcupCandidate.category_id == category_id,
+                WorldcupCandidate.is_active.is_(True),
+            )
+            .order_by(random_func)
+            .limit(round_size)
+        )
+        movie_ids = list(result.scalars().all())
+        if len(movie_ids) < round_size:
+            raise ValueError(
+                f"카테고리 후보 영화가 부족합니다. 요청 라운드={round_size}, 실제 후보 수={len(movie_ids)}"
+            )
+        return movie_ids
+
+    async def _count_eligible_movies_by_selected_genres(self, genres: list[str]) -> int:
+        genre_conditions = [
+            self._movie_repo._json_array_contains(Movie.genres, genre)
+            for genre in genres
+        ]
+        query = select(func.count(Movie.movie_id)).where(
+            Movie.poster_path.isnot(None),
+            func.coalesce(Movie.vote_count, 0) >= MIN_GENRE_VOTE_COUNT,
+            or_(*genre_conditions),
+        )
+        result = await self._session.execute(query)
+        return int(result.scalar() or 0)
+
+    async def _resolve_genre_candidate_movie_ids(
+        self,
+        genres: list[str],
+        round_size: int,
+    ) -> list[str]:
+        genre_conditions = [
+            self._movie_repo._json_array_contains(Movie.genres, genre)
+            for genre in genres
+        ]
+        query = select(Movie).where(
+            Movie.poster_path.isnot(None),
+            func.coalesce(Movie.vote_count, 0) >= MIN_GENRE_VOTE_COUNT,
+            or_(*genre_conditions),
+        )
+        result = await self._session.execute(query)
+        eligible_movies = list(result.scalars().all())
+        movie_ids = self._select_prioritized_genre_movie_ids(eligible_movies, genres, round_size)
+        if len(movie_ids) < round_size:
+            raise ValueError(
+                f"장르 조건을 만족하는 후보 영화가 부족합니다. 요청 라운드={round_size}, 실제 후보 수={len(movie_ids)}"
+            )
+        return movie_ids
+
+    async def _fetch_movies_by_ids(self, movie_ids: list[str]) -> list[Movie]:
+        movies = await self._movie_repo.find_by_ids(movie_ids)
+        movie_map = {movie.movie_id: movie for movie in movies}
+        return [movie_map[movie_id] for movie_id in movie_ids if movie_id in movie_map]
+
+    async def _store_worldcup_state(
+        self,
+        user_id: str,
+        round_size: int,
+        candidate_ids: list[str],
+        source_type: WorldcupSourceType,
+        category_id: int | None,
+        selected_genres: list[str],
+        candidate_pool_size: int,
+    ) -> None:
+        state = {
+            "round_size": round_size,
+            "candidates": json.dumps(candidate_ids),
+            "selection_log": json.dumps([]),
+            "current_round": round_size,
+            "source_type": source_type.value,
+            "category_id": category_id or "",
+            "selected_genres_json": json.dumps(selected_genres, ensure_ascii=False),
+            "candidate_pool_size": candidate_pool_size,
+        }
+        redis_key = f"{self.REDIS_KEY_PREFIX}{user_id}"
+        try:
+            await self._redis.hset(redis_key, mapping=state)
+            await self._redis.expire(redis_key, 3600)
+        except Exception as e:
+            logger.warning(f"Redis 월드컵 상태 저장 실패: {e}")
+
+    def _build_bracket_response(
+        self,
+        movies: list[Movie],
+        round_size: int,
+    ) -> WorldcupBracketResponse:
+        matches: list[WorldcupMatch] = []
+        for i in range(0, len(movies), 2):
+            match = WorldcupMatch(
+                match_id=i // 2 + 1,
+                movie_a=self._to_movie_brief(movies[i]),
+                movie_b=self._to_movie_brief(movies[i + 1]),
+            )
+            matches.append(match)
+
+        total_rounds = 0
+        current_round = round_size
+        while current_round > 1:
+            current_round //= 2
+            total_rounds += 1
+
+        return WorldcupBracketResponse(
+            round_size=round_size,
+            matches=matches,
+            total_rounds=total_rounds,
+        )
+
+    def _compute_available_round_sizes(self, candidate_pool_size: int) -> list[int]:
+        return [
+            round_size
+            for round_size in SUPPORTED_ROUND_SIZES
+            if candidate_pool_size >= round_size
+        ]
+
+    def _normalize_genres(self, genres: list[str] | None) -> list[str]:
+        if not genres:
+            return []
+        normalized: list[str] = []
+        for genre in genres:
+            if genre is None:
+                continue
+            trimmed = genre.strip()
+            if trimmed and trimmed not in normalized:
+                normalized.append(trimmed)
+        return normalized
+
+    def _random_function(self):
+        return func.rand() if self._movie_repo._dialect_name == "mysql" else func.random()
+
+    def _select_prioritized_genre_movie_ids(
+        self,
+        movies: list[Movie],
+        selected_genres: list[str],
+        round_size: int,
+    ) -> list[str]:
+        """
+        선택 장르를 더 많이 만족하는 영화를 우선 선출합니다.
+
+        예: [로맨스, 액션, 판타지] 선택 시
+        - 3개 모두 포함 영화
+        - 2개 포함 영화
+        - 1개 포함 영화
+        순서로 후보를 채웁니다.
+        """
+        grouped_movie_ids: dict[int, list[str]] = {}
+        selected_genre_set = set(selected_genres)
+
+        for movie in movies:
+            match_count = len(selected_genre_set.intersection(movie.get_genres_list()))
+            if match_count <= 0:
+                continue
+            grouped_movie_ids.setdefault(match_count, []).append(movie.movie_id)
+
+        prioritized_ids: list[str] = []
+        for match_count in sorted(grouped_movie_ids.keys(), reverse=True):
+            group_ids = grouped_movie_ids[match_count]
+            random.shuffle(group_ids)
+            prioritized_ids.extend(group_ids)
+            if len(prioritized_ids) >= round_size:
+                break
+
+        return prioritized_ids[:round_size]
 
     async def _analyze_preferences(
         self, selection_log: list[dict]

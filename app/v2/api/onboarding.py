@@ -2,7 +2,8 @@
 회원 개인화 초기 설정(온보딩) API 엔드포인트 (v2 Raw SQL)
 
 v1(SQLAlchemy ORM)의 onboarding.py를 aiomysql Connection 기반으로 재구현합니다.
-엔드포인트 구조와 응답 스키마는 v1과 완전히 동일합니다.
+엔드포인트 구조와 응답 스키마는 v1과 동일하며,
+월드컵 시작 흐름은 `categories -> options -> start -> pick -> result` 순서를 따릅니다.
 
 변경점: Depends(get_db) → Depends(get_conn)
 """
@@ -11,7 +12,7 @@ import logging
 
 import aiomysql
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.v2.api.deps import get_conn, get_current_user, get_redis_client
 from app.model.schema import (
@@ -23,9 +24,14 @@ from app.model.schema import (
     MoodSelectionResponse,
     OnboardingStatusResponse,
     WorldcupBracketResponse,
+    WorldcupCategoryOptionResponse,
+    WorldcupGenreOptionResponse,
     WorldcupResultResponse,
     WorldcupSelectionRequest,
     WorldcupSelectionResponse,
+    WorldcupStartOptionsRequest,
+    WorldcupStartOptionsResponse,
+    WorldcupStartRequest,
 )
 from app.v2.service.onboarding_service import OnboardingService
 from app.v2.service.worldcup_service import WorldcupService
@@ -81,33 +87,80 @@ async def save_genre_selection(
 # =========================================
 
 @router.get(
-    "/worldcup",
-    response_model=WorldcupBracketResponse,
-    summary="월드컵용 영화 후보 생성",
-    description=(
-        "선택한 장르 기반으로 16강 또는 32강 영화 후보를 생성하고 대진표를 반환합니다."
-    ),
+    "/worldcup/genres",
+    response_model=list[WorldcupGenreOptionResponse],
+    summary="커스텀 월드컵 장르 목록",
+    description="genre_master 기반으로 커스텀 월드컵에서 선택 가능한 장르 목록을 반환합니다.",
 )
-async def generate_worldcup(
-    round_size: int = Query(
-        default=16,
-        description="라운드 크기 (16 또는 32)",
-        ge=4,
-        le=32,
-    ),
+async def get_worldcup_genres(
     conn: aiomysql.Connection = Depends(get_conn),
     redis: aioredis.Redis = Depends(get_redis_client),
     user_id: str = Depends(get_current_user),
 ):
-    """월드컵 대진표 생성 엔드포인트"""
-    if round_size > 16:
-        round_size = 32
-    else:
-        round_size = 16
+    """커스텀 월드컵 빌더용 장르 목록 조회 엔드포인트."""
+    service = WorldcupService(conn, redis)
+    return await service.get_available_genres()
 
+
+@router.get(
+    "/worldcup/categories",
+    response_model=list[WorldcupCategoryOptionResponse],
+    summary="월드컵 카테고리 목록",
+    description="사용자에게 노출할 활성 월드컵 카테고리와 각 카테고리별 가능 라운드를 반환합니다.",
+)
+async def get_worldcup_categories(
+    conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis = Depends(get_redis_client),
+    user_id: str = Depends(get_current_user),
+):
+    """월드컵 시작 화면용 카테고리 목록 조회 엔드포인트."""
+    service = WorldcupService(conn, redis)
+    return await service.get_available_categories()
+
+
+@router.post(
+    "/worldcup/options",
+    response_model=WorldcupStartOptionsResponse,
+    summary="월드컵 시작 가능 라운드 계산",
+    description=(
+        "카테고리 또는 장르 조건으로 후보 풀 크기와 시작 가능한 라운드 목록을 계산합니다."
+    ),
+)
+async def get_worldcup_start_options(
+    request: WorldcupStartOptionsRequest,
+    conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis = Depends(get_redis_client),
+    user_id: str = Depends(get_current_user),
+):
+    """월드컵 시작 전 옵션 계산 엔드포인트."""
     service = WorldcupService(conn, redis)
     try:
-        return await service.generate_bracket(user_id, round_size)
+        return await service.get_start_options(request)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.post(
+    "/worldcup/start",
+    response_model=WorldcupBracketResponse,
+    summary="월드컵 대진표 생성",
+    description=(
+        "category/sourceType/selectedGenres/roundSize 조건으로 월드컵 후보를 생성하고 대진표를 반환합니다."
+    ),
+)
+async def start_worldcup(
+    request: WorldcupStartRequest,
+    conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis = Depends(get_redis_client),
+    user_id: str = Depends(get_current_user),
+):
+    """새 월드컵 시작 엔드포인트."""
+    service = WorldcupService(conn, redis)
+    try:
+        return await service.start_worldcup(user_id, request)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
