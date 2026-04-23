@@ -77,12 +77,13 @@ class SearchService:
         page: int = 1,
         size: int = 20,
         user_id: str | None = None,
+        save_history: bool = False,
     ) -> MovieSearchResponse:
         """
         영화를 검색하고 필터링된 결과를 반환합니다.
 
         검색과 동시에 부수 작업 수행:
-        - 로그인 사용자: 검색 이력 저장
+        - 로그인 사용자 + save_history=true: 검색 이력 저장
         - 인기 검색어 점수 증가 (Redis + MySQL)
         """
         # 입력값 정규화
@@ -160,7 +161,7 @@ class SearchService:
             should_track_search_event = page == 1
 
             # 로그인 사용자의 검색 이력 저장
-            if user_id and should_track_search_event:
+            if user_id and save_history and should_track_search_event:
                 try:
                     await self._history_repo.add_search(
                         user_id=user_id,

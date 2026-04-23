@@ -62,7 +62,13 @@ class ReviewService:
         size = min(max(1, size), 100)
         offset = (page - 1) * size
 
-        rows = await self._repo.list_by_movie(movie_id, offset, size, sort)
+        rows = await self._repo.list_by_movie(
+            movie_id,
+            offset,
+            size,
+            sort,
+            current_user_id=user_id,
+        )
         total = await self._repo.count_by_movie(movie_id)
         reviews = [self._to_review_item(row, user_id) for row in rows]
         return ReviewListResponse(reviews=reviews, total=total)
@@ -78,7 +84,12 @@ class ReviewService:
         size = min(max(1, size), 100)
         offset = (page - 1) * size
 
-        rows = await self._repo.list_by_user(user_id, offset, size)
+        rows = await self._repo.list_by_user(
+            user_id,
+            offset,
+            size,
+            current_user_id=user_id,
+        )
         total = await self._repo.count_by_user(user_id)
         total_pages = (total + size - 1) // size if total > 0 else 0
 
@@ -202,6 +213,7 @@ class ReviewService:
             review_category_code=row.get("review_category_code"),
             created_at=row["created_at"],
             like_count=int(row.get("like_count") or 0),
+            liked=self._to_bool(row.get("liked")),
         )
 
     @staticmethod

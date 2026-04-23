@@ -82,6 +82,10 @@ async def search_movies(
     # 페이지네이션
     page: int = Query(default=1, description="페이지 번호 (1부터)", ge=1),
     size: int = Query(default=20, description="페이지 크기 (최대 100)", ge=1, le=100),
+    save_history: bool = Query(
+        default=False,
+        description="최근 검색어 저장 여부 (/search 페이지 검색만 true)",
+    ),
     # 의존성 — v2: aiomysql.Connection
     conn: aiomysql.Connection = Depends(get_conn),
     redis: aioredis.Redis = Depends(get_redis_client),
@@ -90,7 +94,7 @@ async def search_movies(
     """
     영화 검색 엔드포인트
 
-    비로그인 사용자도 검색 가능하며, 로그인 시 검색 이력이 자동 저장됩니다.
+    비로그인 사용자도 검색 가능하며, 최근 검색어 저장은 save_history=true일 때만 수행됩니다.
     """
     normalized_genres = normalize_search_genre_labels(
         [item for item in (genres or "").split(",") if item.strip()]
@@ -112,6 +116,7 @@ async def search_movies(
         page=page,
         size=size,
         user_id=user_id,
+        save_history=save_history,
     )
 
 
