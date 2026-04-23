@@ -1,0 +1,202 @@
+# =========================================
+# 몽글픽 Recommend 서비스 운영 배포 워크플로우 (Production CD)
+# =========================================
+# 트리거:
+#   - main 브랜치 push → 자동 운영 배포
+#   - workflow_dispatch → 수동 배포/롤백 (image_tag 지정 가능)
+#
+# 배포 흐름:
+#   1) pytest (SQLite 인메모리, FakeRedis)
+#   2) Docker 이미지 빌드 후 GHCR push (태그: {sha}, latest)
+#   3) VM2(10.20.0.11)에 VM1 ProxyJump SSH 접속 → GHCR pull → compose up -d
+#   4) 헬스체크 실패 시 직전 이미지로 자동 롤백
+#
+# 사전 세팅 (docs/CI_CD_운영배포_가이드.md 참고):
+#   - VM2 ~/monglepick/docker-compose.prod.app.yml 이미지 태그가
+#     ghcr.io/monglepick/monglepick-recommend:latest 로 설정되어 있어야 함
+
+name: CD (Production)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "배포할 이미지 태그 (비우면 HEAD SHA 사용)"
+        required: false
+        default: ""
+
+concurrency:
+  group: cd-prod-recommend
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/monglepick-recommend
+  SERVICE_NAME: monglepick-recommend
+  HEALTHCHECK_URL: http://localhost:8001/health
+
+jobs:
+  # ─── 1. 테스트 ───
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Test
+        env:
+          APP_NAME: monglepick-recommend
+          APP_VERSION: 0.1.0
+          DEBUG: "true"
+          API_V1_PREFIX: /api/v1
+          DB_HOST: 127.0.0.1
+          DB_PORT: "3306"
+          DB_NAME: test_db
+          DB_USERNAME: test_user
+          DB_PASSWORD: test_password
+          REDIS_HOST: localhost
+          REDIS_PORT: "6379"
+          REDIS_DB: "1"
+          JWT_SECRET: ci-test-jwt-secret-not-for-production-use-only
+          JWT_ALGORITHM: HS256
+          SERVER_HOST: 0.0.0.0
+          SERVER_PORT: "8001"
+          CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+          TMDB_IMAGE_BASE_URL: https://image.tmdb.org/t/p/w500
+        run: uv run pytest tests/ -v --tb=short -q
+
+  # ─── 2. Docker 이미지 빌드 + GHCR push ───
+  build-and-push:
+    name: Build & Push Image
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: resolve
+        run: |
+          INPUT_TAG="${{ github.event.inputs.image_tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            echo "tag=$INPUT_TAG" >> $GITHUB_OUTPUT
+            echo "SKIP_BUILD=true" >> $GITHUB_ENV
+          else
+            echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "SKIP_BUILD=false" >> $GITHUB_ENV
+          fi
+
+      - name: Setup Docker Buildx
+        if: env.SKIP_BUILD == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: env.SKIP_BUILD == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        if: env.SKIP_BUILD == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.resolve.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── 3. VM2 배포 ───
+  deploy:
+    name: Deploy to VM2
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Setup SSH (ProxyJump via VM1)
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cat >> ~/.ssh/config <<EOF
+          Host vm1
+            HostName ${{ secrets.VM1_HOST }}
+            User ${{ secrets.VM_USER }}
+            IdentityFile ~/.ssh/id_ed25519
+            StrictHostKeyChecking accept-new
+
+          Host vm2
+            HostName ${{ secrets.VM2_HOST }}
+            User ${{ secrets.VM_USER }}
+            IdentityFile ~/.ssh/id_ed25519
+            ProxyJump vm1
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: Deploy via SSH
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          ssh vm2 bash -s <<EOF
+          set -euo pipefail
+          cd ~/monglepick
+
+          PREV_IMAGE_ID=\$(docker inspect --format='{{.Image}}' monglepick-recommend 2>/dev/null || echo "")
+          echo "직전 이미지: \$PREV_IMAGE_ID"
+
+          docker pull ${{ env.IMAGE_NAME }}:$IMAGE_TAG
+          docker tag ${{ env.IMAGE_NAME }}:$IMAGE_TAG ${{ env.IMAGE_NAME }}:latest
+
+          docker compose -f docker-compose.prod.app.yml --env-file .env.prod \
+            up -d --no-deps --force-recreate ${{ env.SERVICE_NAME }}
+
+          echo ">>> 헬스체크 대기..."
+          HEALTHY=false
+          for i in 1 2 3 4 5; do
+            if curl -sf ${{ env.HEALTHCHECK_URL }} > /dev/null 2>&1; then
+              echo "  ✅ Recommend OK (\$i/5)"
+              HEALTHY=true
+              break
+            fi
+            echo "  ⏳ Recommend starting... (\$i/5)"
+            sleep 5
+          done
+
+          if [ "\$HEALTHY" = "false" ]; then
+            echo "❌ 헬스체크 실패 → 롤백"
+            if [ -n "\$PREV_IMAGE_ID" ]; then
+              docker tag "\$PREV_IMAGE_ID" ${{ env.IMAGE_NAME }}:latest
+              docker compose -f docker-compose.prod.app.yml --env-file .env.prod \
+                up -d --no-deps --force-recreate ${{ env.SERVICE_NAME }}
+              echo "🔙 이전 이미지로 롤백 완료"
+            fi
+            exit 1
+          fi
+
+          docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/${{ github.repository }}" || true
+          EOF
