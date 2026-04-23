@@ -127,6 +127,24 @@ async def test_search_movies_by_title(client: AsyncClient, async_session: AsyncS
 
 
 @pytest.mark.asyncio
+async def test_search_movies_does_not_save_history_by_default(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """검색 API는 save_history=true일 때만 최근 검색어를 저장합니다."""
+    await _insert_test_movies(async_session)
+
+    response = await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
+    assert response.status_code == 200
+
+    history_result = await async_session.execute(
+        select(SearchHistory).where(SearchHistory.keyword == "인터스텔라")
+    )
+    history_records = list(history_result.scalars())
+    assert history_records == []
+
+
+@pytest.mark.asyncio
 async def test_search_genre_options_endpoint_returns_filtered_catalog(client: AsyncClient):
     """검색용 장르 목록은 정제 규칙이 반영된 형태로 반환됩니다."""
     response = await client.get("/api/v1/search/genres")
@@ -162,7 +180,7 @@ async def test_search_movies_by_selected_genres_without_keyword(
 
     response = await client.get(
         "/api/v1/search/movies",
-        params={"genres": "액션,드라마", "sort_by": "rating"},
+        params={"genres": "액션,드라마", "sort_by": "rating", "save_history": True},
     )
     assert response.status_code == 200
 
@@ -660,8 +678,8 @@ async def test_recent_searches(client: AsyncClient, async_session: AsyncSession)
     await _insert_test_movies(async_session)
 
     # 검색 실행 (이력 자동 저장)
-    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
-    await client.get("/api/v1/search/movies", params={"q": "기생충"})
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라", "save_history": True})
+    await client.get("/api/v1/search/movies", params={"q": "기생충", "save_history": True})
 
     # 최근 검색어 조회
     response = await client.get("/api/v1/search/recent")
@@ -681,8 +699,8 @@ async def test_recent_searches_deduplicate_same_keyword(
     """같은 키워드를 여러 번 검색해도 최근 검색어는 한 번만 노출됩니다."""
     await _insert_test_movies(async_session)
 
-    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
-    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라", "save_history": True})
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라", "save_history": True})
 
     response = await client.get("/api/v1/search/recent")
     assert response.status_code == 200
@@ -736,11 +754,11 @@ async def test_search_history_is_not_saved_for_pagination_requests(
 
     first_response = await client.get(
         "/api/v1/search/movies",
-        params={"q": "테스트", "page": 1, "size": 1},
+        params={"q": "테스트", "page": 1, "size": 1, "save_history": True},
     )
     second_response = await client.get(
         "/api/v1/search/movies",
-        params={"q": "테스트", "page": 2, "size": 1},
+        params={"q": "테스트", "page": 2, "size": 1, "save_history": True},
     )
 
     assert first_response.status_code == 200
@@ -765,10 +783,10 @@ async def test_recent_searches_limit_10_with_deduplication(
 
     for idx in range(35):
         keyword = f"테스트키워드-{idx}"
-        await client.get("/api/v1/search/movies", params={"q": keyword})
+        await client.get("/api/v1/search/movies", params={"q": keyword, "save_history": True})
 
     # 가장 최신 키워드를 한 번 더 검색해도 결과 목록에는 중복 없이 1회만 노출돼야 함
-    await client.get("/api/v1/search/movies", params={"q": "테스트키워드-34"})
+    await client.get("/api/v1/search/movies", params={"q": "테스트키워드-34", "save_history": True})
 
     response = await client.get("/api/v1/search/recent")
     assert response.status_code == 200
@@ -798,11 +816,11 @@ async def test_recent_searches_support_offset_pagination_without_duplicates(
 
     for idx in range(65):
         keyword = f"페이지키워드-{idx}"
-        await client.get("/api/v1/search/movies", params={"q": keyword})
+        await client.get("/api/v1/search/movies", params={"q": keyword, "save_history": True})
 
     # 중복 검색이 있어도 페이지 간 목록에는 같은 키워드가 다시 나오지 않아야 함
-    await client.get("/api/v1/search/movies", params={"q": "페이지키워드-64"})
-    await client.get("/api/v1/search/movies", params={"q": "페이지키워드-40"})
+    await client.get("/api/v1/search/movies", params={"q": "페이지키워드-64", "save_history": True})
+    await client.get("/api/v1/search/movies", params={"q": "페이지키워드-40", "save_history": True})
 
     first_response = await client.get("/api/v1/search/recent", params={"offset": 0, "limit": 10})
     second_response = await client.get("/api/v1/search/recent", params={"offset": 10, "limit": 10})
@@ -898,7 +916,7 @@ async def test_delete_recent_keyword(client: AsyncClient, async_session: AsyncSe
     await _insert_test_movies(async_session)
 
     # 검색 실행
-    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라", "save_history": True})
 
     # 삭제
     response = await client.delete("/api/v1/search/recent/인터스텔라")
@@ -917,8 +935,8 @@ async def test_delete_all_recent(client: AsyncClient, async_session: AsyncSessio
     await _insert_test_movies(async_session)
 
     # 검색 실행
-    await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
-    await client.get("/api/v1/search/movies", params={"q": "기생충"})
+    await client.get("/api/v1/search/movies", params={"q": "인터스텔라", "save_history": True})
+    await client.get("/api/v1/search/movies", params={"q": "기생충", "save_history": True})
 
     # 전체 삭제
     response = await client.delete("/api/v1/search/recent")
