@@ -521,6 +521,7 @@ class ReviewItem(BaseModel):
     review_category_code: str | None = Field(default=None, description="리뷰 카테고리 코드")
     created_at: datetime = Field(description="리뷰 작성 시각")
     like_count: int = Field(default=0, description="리뷰 좋아요 수")
+    liked: bool = Field(default=False, description="현재 로그인 사용자의 리뷰 좋아요 여부")
 
 
 class ReviewListResponse(BaseModel):
