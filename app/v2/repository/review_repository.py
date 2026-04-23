@@ -56,6 +56,7 @@ class ReviewRepository:
         offset: int,
         limit: int,
         sort: str = "latest",
+        current_user_id: str | None = None,
     ) -> list[dict]:
         """
         특정 영화의 리뷰 목록을 조회한다.
@@ -91,6 +92,14 @@ class ReviewRepository:
             if "review_category_code" in review_columns
             else "NULL AS review_category_code"
         )
+        like_status_select = "0 AS liked"
+        params: list[object] = [movie_id, limit, offset]
+        if current_user_id is not None:
+            like_status_select = (
+                "EXISTS(SELECT 1 FROM review_likes rl2 "
+                f"WHERE rl2.review_id = r.{review_id_column} AND rl2.user_id = %s) AS liked"
+            )
+            params = [current_user_id, movie_id, limit, offset]
 
         sql = (
             "SELECT "
@@ -104,7 +113,8 @@ class ReviewRepository:
             f"  {review_source_select}, "
             f"  {review_category_select}, "
             "  r.created_at, "
-            f"  (SELECT COUNT(*) FROM review_likes rl WHERE rl.review_id = r.{review_id_column}) AS like_count "
+            f"  (SELECT COUNT(*) FROM review_likes rl WHERE rl.review_id = r.{review_id_column}) AS like_count, "
+            f"  {like_status_select} "
             "FROM reviews r "
             "LEFT JOIN users u ON u.user_id = r.user_id "
             f"WHERE {' AND '.join(where_clauses)} "
@@ -112,7 +122,7 @@ class ReviewRepository:
             "LIMIT %s OFFSET %s"
         )
         async with self._conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(sql, (movie_id, limit, offset))
+            await cur.execute(sql, tuple(params))
             return list(await cur.fetchall() or [])
 
     async def count_by_movie(self, movie_id: str) -> int:
@@ -134,7 +144,13 @@ class ReviewRepository:
             row = await cur.fetchone()
         return int(row["cnt"]) if row and row["cnt"] is not None else 0
 
-    async def list_by_user(self, user_id: str, offset: int, limit: int) -> list[dict]:
+    async def list_by_user(
+        self,
+        user_id: str,
+        offset: int,
+        limit: int,
+        current_user_id: str | None = None,
+    ) -> list[dict]:
         """
         특정 사용자가 작성한 리뷰 목록을 최신순으로 조회한다.
 
@@ -161,6 +177,14 @@ class ReviewRepository:
             if "review_category_code" in review_columns
             else "NULL AS review_category_code"
         )
+        like_status_select = "0 AS liked"
+        params: list[object] = [user_id, limit, offset]
+        if current_user_id is not None:
+            like_status_select = (
+                "EXISTS(SELECT 1 FROM review_likes rl2 "
+                f"WHERE rl2.review_id = r.{review_id_column} AND rl2.user_id = %s) AS liked"
+            )
+            params = [current_user_id, user_id, limit, offset]
 
         sql = (
             "SELECT "
@@ -176,7 +200,8 @@ class ReviewRepository:
             f"  {review_source_select}, "
             f"  {review_category_select}, "
             "  r.created_at, "
-            f"  (SELECT COUNT(*) FROM review_likes rl WHERE rl.review_id = r.{review_id_column}) AS like_count "
+            f"  (SELECT COUNT(*) FROM review_likes rl WHERE rl.review_id = r.{review_id_column}) AS like_count, "
+            f"  {like_status_select} "
             "FROM reviews r "
             "LEFT JOIN users u ON u.user_id = r.user_id "
             "LEFT JOIN movies m ON m.movie_id = r.movie_id "
@@ -185,7 +210,7 @@ class ReviewRepository:
             "LIMIT %s OFFSET %s"
         )
         async with self._conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(sql, (user_id, limit, offset))
+            await cur.execute(sql, tuple(params))
             return list(await cur.fetchall() or [])
 
     async def count_by_user(self, user_id: str) -> int:
