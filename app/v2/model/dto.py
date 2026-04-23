@@ -221,6 +221,12 @@ class WorldcupResultDTO(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator("onboarding_completed", "reward_granted", mode="before")
+    @classmethod
+    def _normalize_mysql_bit_flags(cls, value: Any) -> Any:
+        """MySQL BIT(1) 컬럼이 bytes로 들어오는 경우를 bool로 정규화합니다."""
+        return _parse_mysql_bool(value)
+
     @property
     def id(self) -> int:
         """구버전 코드 호환용 별칭."""
@@ -254,6 +260,12 @@ class WorldcupSessionDTO(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator("reward_granted", mode="before")
+    @classmethod
+    def _normalize_mysql_bit_flags(cls, value: Any) -> Any:
+        """MySQL BIT(1) 컬럼이 bytes로 들어오는 경우를 bool로 정규화합니다."""
+        return _parse_mysql_bool(value)
+
 
 # ─────────────────────────────────────────
 # 유틸리티 함수
@@ -272,3 +284,12 @@ def _parse_json_list(value: Any) -> list[str]:
         except (json.JSONDecodeError, TypeError):
             return []
     return []
+
+
+def _parse_mysql_bool(value: Any) -> Any:
+    """aiomysql가 BIT(1)을 bytes로 반환할 때 bool로 변환합니다."""
+    if isinstance(value, (bytes, bytearray)):
+        if len(value) == 0:
+            return False
+        return int.from_bytes(value, byteorder="big") != 0
+    return value

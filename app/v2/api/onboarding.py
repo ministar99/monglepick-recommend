@@ -254,13 +254,13 @@ async def save_mood_selection(
 @router.get(
     "/status",
     response_model=OnboardingStatusResponse,
-    summary="온보딩 완료 여부 확인",
-    description="3단계(장르→월드컵→무드) 전체 완료 여부를 단계별로 반환합니다.",
+    summary="시작 미션 상태 확인",
+    description="영화 월드컵, 선호 장르, 최애 영화 3개 미션의 완료 여부를 반환합니다.",
 )
 async def get_onboarding_status(
     conn: aiomysql.Connection = Depends(get_conn),
     user_id: str = Depends(get_current_user),
 ):
-    """온보딩 상태 확인 엔드포인트"""
+    """시작 미션 온보딩 상태 확인 엔드포인트"""
     service = OnboardingService(conn)
     return await service.get_onboarding_status(user_id)

@@ -14,7 +14,7 @@ SQLite 인메모리 DB + FakeRedis를 사용합니다.
 - GET  /api/v1/onboarding/worldcup/result: 월드컵 결과 분석
 - GET  /api/v1/onboarding/moods: 무드 태그 목록
 - POST /api/v1/onboarding/moods: 무드 선택 저장
-- GET  /api/v1/onboarding/status: 온보딩 상태 확인
+- GET  /api/v1/onboarding/status: 시작 미션 상태 확인
 """
 
 import pytest
@@ -148,6 +148,27 @@ async def _insert_worldcup_genre_master(session: AsyncSession) -> None:
           ('g3', 'EROTIC', '에로', 999),
           ('g4', 'DOCU', '다큐멘터리', 80),
           ('g5', 'DIVISION', '반공/분단', 500)
+    """))
+    await session.flush()
+
+
+async def _ensure_onboarding_mission_tables(session: AsyncSession) -> None:
+    """시작 미션 상태 테스트용 fav_genre / fav_movie 테이블을 생성합니다."""
+    await session.execute(text("""
+        CREATE TABLE IF NOT EXISTS fav_genre (
+            fav_genre_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id VARCHAR(50) NOT NULL,
+            genre_id VARCHAR(50) NOT NULL,
+            priority INTEGER NULL
+        )
+    """))
+    await session.execute(text("""
+        CREATE TABLE IF NOT EXISTS fav_movie (
+            fav_movie_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id VARCHAR(50) NOT NULL,
+            movie_id VARCHAR(50) NOT NULL,
+            priority INTEGER NULL
+        )
     """))
     await session.flush()
 
@@ -562,38 +583,95 @@ async def test_save_mood_empty(client: AsyncClient, async_session: AsyncSession)
 
 
 # =========================================
-# 온보딩 상태 테스트
+# 시작 미션 상태 테스트
 # =========================================
 
 @pytest.mark.asyncio
 async def test_onboarding_status_initial(client: AsyncClient, async_session: AsyncSession):
-    """초기 상태에서 모든 단계가 미완료입니다."""
+    """초기 상태에서 시작 미션 3개가 모두 미완료입니다."""
     await _insert_test_user(async_session)
+    await _ensure_onboarding_mission_tables(async_session)
 
     response = await client.get("/api/v1/onboarding/status")
     assert response.status_code == 200
 
     data = response.json()
     assert data["is_completed"] is False
-    assert data["genre_selected"] is False
+    assert data["completed_mission_count"] == 0
     assert data["worldcup_completed"] is False
-    assert data["mood_selected"] is False
+    assert data["favorite_genres_completed"] is False
+    assert data["favorite_movies_completed"] is False
+    assert data["favorite_genre_count"] == 0
+    assert data["favorite_movie_count"] == 0
 
 
 @pytest.mark.asyncio
-async def test_onboarding_status_after_genre(client: AsyncClient, async_session: AsyncSession):
-    """장르 선택 후 genre_selected만 True입니다."""
+async def test_onboarding_status_after_favorite_genre(client: AsyncClient, async_session: AsyncSession):
+    """선호 장르 저장 후 해당 미션만 완료로 표시됩니다."""
     await _insert_test_user(async_session)
+    await _ensure_onboarding_mission_tables(async_session)
 
-    # 장르 선택
-    await client.post(
-        "/api/v1/onboarding/genres",
-        json={"selected_genres": ["액션", "SF", "드라마"]},
+    await async_session.execute(
+        text(
+            "INSERT INTO fav_genre (user_id, genre_id, priority) "
+            "VALUES (:user_id, :genre_id, :priority)"
+        ),
+        {"user_id": TEST_USER_ID, "genre_id": "g1", "priority": 1},
     )
+    await async_session.flush()
 
     response = await client.get("/api/v1/onboarding/status")
     data = response.json()
-    assert data["genre_selected"] is True
+    assert data["favorite_genres_completed"] is True
+    assert data["favorite_genre_count"] == 1
     assert data["worldcup_completed"] is False
-    assert data["mood_selected"] is False
+    assert data["favorite_movies_completed"] is False
+    assert data["favorite_movie_count"] == 0
+    assert data["completed_mission_count"] == 1
     assert data["is_completed"] is False
+
+
+@pytest.mark.asyncio
+async def test_onboarding_status_all_completed(client: AsyncClient, async_session: AsyncSession):
+    """세 미션 데이터가 모두 있으면 전체 완료로 표시됩니다."""
+    await _insert_test_user(async_session)
+    await _ensure_onboarding_mission_tables(async_session)
+
+    await async_session.execute(
+        text(
+            "INSERT INTO fav_genre (user_id, genre_id, priority) "
+            "VALUES (:user_id, :genre_id, :priority)"
+        ),
+        {"user_id": TEST_USER_ID, "genre_id": "g1", "priority": 1},
+    )
+    await async_session.execute(
+        text(
+            "INSERT INTO fav_movie (user_id, movie_id, priority) "
+            "VALUES (:user_id, :movie_id, :priority)"
+        ),
+        {"user_id": TEST_USER_ID, "movie_id": "1001", "priority": 1},
+    )
+    async_session.add(
+        WorldcupResult(
+            user_id=TEST_USER_ID,
+            round_size=16,
+            winner_movie_id="1001",
+            runner_up_movie_id="1002",
+            onboarding_completed=True,
+            reward_granted=False,
+            total_matches=15,
+        )
+    )
+    await async_session.flush()
+
+    response = await client.get("/api/v1/onboarding/status")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["worldcup_completed"] is True
+    assert data["favorite_genres_completed"] is True
+    assert data["favorite_movies_completed"] is True
+    assert data["favorite_genre_count"] == 1
+    assert data["favorite_movie_count"] == 1
+    assert data["completed_mission_count"] == 3
+    assert data["is_completed"] is True
