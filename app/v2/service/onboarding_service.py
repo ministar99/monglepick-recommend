@@ -23,6 +23,8 @@ from app.model.schema import (
     OnboardingStatusResponse,
 )
 from app.v2.model.dto import MovieDTO
+from app.v2.repository.favorite_genre_repository import FavoriteGenreRepository
+from app.v2.repository.favorite_movie_repository import FavoriteMovieRepository
 from app.v2.repository.movie_repository import MovieRepository
 from app.v2.repository.user_preference_repository import UserPreferenceRepository
 
@@ -62,6 +64,8 @@ class OnboardingService:
         self._settings = get_settings()
         self._movie_repo = MovieRepository(conn)
         self._pref_repo = UserPreferenceRepository(conn)
+        self._favorite_genre_repo = FavoriteGenreRepository(conn)
+        self._favorite_movie_repo = FavoriteMovieRepository(conn)
 
     # ─────────────────────────────────────────
     # 1단계: 장르 선택
@@ -134,9 +138,31 @@ class OnboardingService:
     # ─────────────────────────────────────────
 
     async def get_onboarding_status(self, user_id: str) -> OnboardingStatusResponse:
-        """사용자의 온보딩 완료 여부를 단계별로 확인합니다."""
-        status = await self._pref_repo.is_onboarding_completed(user_id)
-        return OnboardingStatusResponse(**status)
+        """사용자의 시작 미션 온보딩 상태를 확인합니다."""
+        worldcup = await self._pref_repo.get_worldcup_result(user_id)
+        favorite_genres = await self._favorite_genre_repo.list_selected_by_user(user_id)
+        favorite_movies = await self._favorite_movie_repo.list_by_user(user_id)
+
+        worldcup_completed = bool(worldcup and worldcup.onboarding_completed)
+        favorite_genre_count = len(favorite_genres)
+        favorite_movie_count = len(favorite_movies)
+        favorite_genres_completed = favorite_genre_count > 0
+        favorite_movies_completed = favorite_movie_count > 0
+        completed_mission_count = (
+            int(worldcup_completed)
+            + int(favorite_genres_completed)
+            + int(favorite_movies_completed)
+        )
+
+        return OnboardingStatusResponse(
+            is_completed=completed_mission_count == 3,
+            completed_mission_count=completed_mission_count,
+            worldcup_completed=worldcup_completed,
+            favorite_genres_completed=favorite_genres_completed,
+            favorite_movies_completed=favorite_movies_completed,
+            favorite_genre_count=favorite_genre_count,
+            favorite_movie_count=favorite_movie_count,
+        )
 
     # ─────────────────────────────────────────
     # 유틸리티
