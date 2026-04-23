@@ -554,11 +554,14 @@ class ReviewUpdateRequest(BaseModel):
 
 class OnboardingStatusResponse(BaseModel):
     """
-    온보딩 완료 여부 확인 응답
+    시작 미션 온보딩 상태 확인 응답
 
-    3단계 전체(장르→월드컵→무드)를 완료했는지 확인합니다.
+    영화 월드컵, 선호 장르, 최애 영화 3개 미션의 완료 여부와 진행 수를 반환합니다.
     """
     is_completed: bool = Field(description="온보딩 전체 완료 여부")
-    genre_selected: bool = Field(description="장르 선택 완료 여부")
+    completed_mission_count: int = Field(description="완료한 미션 수")
     worldcup_completed: bool = Field(description="월드컵 완료 여부")
-    mood_selected: bool = Field(description="무드 선택 완료 여부")
+    favorite_genres_completed: bool = Field(description="선호 장르 저장 완료 여부")
+    favorite_movies_completed: bool = Field(description="최애 영화 저장 완료 여부")
+    favorite_genre_count: int = Field(description="저장된 선호 장르 개수")
+    favorite_movie_count: int = Field(description="저장된 최애 영화 개수")

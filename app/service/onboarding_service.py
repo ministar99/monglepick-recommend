@@ -16,6 +16,7 @@ REQ_019: 무드 기반 초기 영화 추천 설정
 import json
 import logging
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -175,7 +176,7 @@ class OnboardingService:
 
     async def get_onboarding_status(self, user_id: str) -> OnboardingStatusResponse:
         """
-        사용자의 온보딩 완료 여부를 단계별로 확인합니다.
+        사용자의 시작 미션 온보딩 상태를 확인합니다.
 
         Args:
             user_id: 사용자 ID
@@ -183,12 +184,45 @@ class OnboardingService:
         Returns:
             OnboardingStatusResponse: 단계별 완료 여부
         """
-        status = await self._pref_repo.is_onboarding_completed(user_id)
-        return OnboardingStatusResponse(**status)
+        worldcup = await self._pref_repo.get_worldcup_result(user_id)
+        favorite_genre_count = await self._count_user_rows("fav_genre", user_id)
+        favorite_movie_count = await self._count_user_rows("fav_movie", user_id)
+
+        worldcup_completed = bool(worldcup and worldcup.onboarding_completed)
+        favorite_genres_completed = favorite_genre_count > 0
+        favorite_movies_completed = favorite_movie_count > 0
+        completed_mission_count = (
+            int(worldcup_completed)
+            + int(favorite_genres_completed)
+            + int(favorite_movies_completed)
+        )
+
+        return OnboardingStatusResponse(
+            is_completed=completed_mission_count == 3,
+            completed_mission_count=completed_mission_count,
+            worldcup_completed=worldcup_completed,
+            favorite_genres_completed=favorite_genres_completed,
+            favorite_movies_completed=favorite_movies_completed,
+            favorite_genre_count=favorite_genre_count,
+            favorite_movie_count=favorite_movie_count,
+        )
 
     # ─────────────────────────────────────────
     # 유틸리티
     # ─────────────────────────────────────────
+
+    async def _count_user_rows(self, table_name: str, user_id: str) -> int:
+        """
+        fav_genre / fav_movie처럼 ORM 매핑이 없는 공유 테이블의 사용자별 row 수를 셉니다.
+        """
+        if table_name not in {"fav_genre", "fav_movie"}:
+            raise ValueError(f"지원하지 않는 테이블입니다: {table_name}")
+
+        result = await self._session.execute(
+            text(f"SELECT COUNT(*) FROM {table_name} WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
+        return int(result.scalar() or 0)
 
     def _to_movie_brief(self, movie) -> MovieBrief:
         """Movie 엔티티를 MovieBrief 스키마로 변환합니다."""
