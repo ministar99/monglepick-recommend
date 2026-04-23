@@ -12,6 +12,7 @@ from fastapi import APIRouter
 
 from app.api.search import router as search_router
 from app.api.onboarding import router as onboarding_router
+from app.api.ocr import router as ocr_router
 
 # ─────────────────────────────────────────
 # v1 API 라우터 생성
@@ -24,3 +25,6 @@ api_router.include_router(search_router)
 
 # 온보딩 라우터 등록
 api_router.include_router(onboarding_router)
+
+# OCR 영수증 분석 라우터 등록
+api_router.include_router(ocr_router)
