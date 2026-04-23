@@ -1,19 +1,22 @@
 # =========================================
-# 몽글픽 Recommend 서비스 운영 배포 워크플로우 (Production CD)
+# 몽글픽 Recommend 운영 배포 워크플로우 (Production CD)
 # =========================================
-# 트리거:
-#   - main 브랜치 push → 자동 운영 배포
-#   - workflow_dispatch → 수동 배포/롤백 (image_tag 지정 가능)
+# 기준 문서: docs/인프라_배포_가이드.md §6.3 (2026-04-16 최종 운영 배포 실측)
+#
+# 인프라 실체:
+#   - VM2(10.20.0.11) 앱 서버 docker compose
+#     compose 서비스명/컨테이너: **monglepick-recommend**
+#   - 이미지 정책: GHCR (기존 로컬 태그 monglepick-recommend:2.2 에서 전환)
+#   - 환경변수: ~/monglepick/.env.prod → .env 동기화 (§6.3 Step 3-0)
 #
 # 배포 흐름:
 #   1) pytest (SQLite 인메모리, FakeRedis)
-#   2) Docker 이미지 빌드 후 GHCR push (태그: {sha}, latest)
-#   3) VM2(10.20.0.11)에 VM1 ProxyJump SSH 접속 → GHCR pull → compose up -d
-#   4) 헬스체크 실패 시 직전 이미지로 자동 롤백
-#
-# 사전 세팅 (docs/CI_CD_운영배포_가이드.md 참고):
-#   - VM2 ~/monglepick/docker-compose.prod.app.yml 이미지 태그가
-#     ghcr.io/monglepick/monglepick-recommend:latest 로 설정되어 있어야 함
+#   2) Docker Buildx linux/amd64 → GHCR push
+#   3) VM1 ProxyJump → VM2 SSH
+#   4) compose 파일 monglepick-recommend 서비스 image: 교체
+#   5) .env.prod → .env
+#   6) docker pull + up -d --no-deps --force-recreate
+#   7) 헬스체크 + 실패 시 compose 백업 복원
 
 name: CD (Production)
 
@@ -33,31 +36,28 @@ concurrency:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/monglepick-recommend
-  SERVICE_NAME: monglepick-recommend
+  COMPOSE_SERVICE: monglepick-recommend
+  CONTAINER_NAME: monglepick-recommend
   HEALTHCHECK_URL: http://localhost:8001/health
+  VM2_PROJECT_DIR: /home/ubuntu/monglepick
 
 jobs:
-  # ─── 1. 테스트 ───
   test:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-
       - name: Install dependencies
         run: uv sync --frozen
-
       - name: Test
         env:
           APP_NAME: monglepick-recommend
@@ -80,7 +80,6 @@ jobs:
           TMDB_IMAGE_BASE_URL: https://image.tmdb.org/t/p/w500
         run: uv run pytest tests/ -v --tb=short -q
 
-  # ─── 2. Docker 이미지 빌드 + GHCR push ───
   build-and-push:
     name: Build & Push Image
     needs: test
@@ -93,7 +92,6 @@ jobs:
       image_tag: ${{ steps.resolve.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Resolve image tag
         id: resolve
         run: |
@@ -105,11 +103,9 @@ jobs:
             echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
             echo "SKIP_BUILD=false" >> $GITHUB_ENV
           fi
-
       - name: Setup Docker Buildx
         if: env.SKIP_BUILD == 'false'
         uses: docker/setup-buildx-action@v3
-
       - name: Login to GHCR
         if: env.SKIP_BUILD == 'false'
         uses: docker/login-action@v3
@@ -117,12 +113,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
+      - name: Build and push (linux/amd64)
         if: env.SKIP_BUILD == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.resolve.outputs.tag }}
@@ -130,12 +126,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ─── 3. VM2 배포 ───
   deploy:
     name: Deploy to VM2
     needs: build-and-push
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment: production
     steps:
       - name: Setup SSH (ProxyJump via VM1)
@@ -149,6 +144,8 @@ jobs:
             User ${{ secrets.VM_USER }}
             IdentityFile ~/.ssh/id_ed25519
             StrictHostKeyChecking accept-new
+            ServerAliveInterval 30
+            ServerAliveCountMax 20
 
           Host vm2
             HostName ${{ secrets.VM2_HOST }}
@@ -156,47 +153,91 @@ jobs:
             IdentityFile ~/.ssh/id_ed25519
             ProxyJump vm1
             StrictHostKeyChecking accept-new
+            ServerAliveInterval 30
+            ServerAliveCountMax 20
           EOF
 
       - name: Deploy via SSH
         env:
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          COMPOSE_SERVICE: ${{ env.COMPOSE_SERVICE }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
+          HEALTHCHECK_URL: ${{ env.HEALTHCHECK_URL }}
+          VM2_PROJECT_DIR: ${{ env.VM2_PROJECT_DIR }}
+          REPO_SOURCE: https://github.com/${{ github.repository }}
         run: |
-          ssh vm2 bash -s <<EOF
+          ssh vm2 \
+            IMAGE_TAG="$IMAGE_TAG" \
+            IMAGE_NAME="$IMAGE_NAME" \
+            COMPOSE_SERVICE="$COMPOSE_SERVICE" \
+            CONTAINER_NAME="$CONTAINER_NAME" \
+            HEALTHCHECK_URL="$HEALTHCHECK_URL" \
+            VM2_PROJECT_DIR="$VM2_PROJECT_DIR" \
+            REPO_SOURCE="$REPO_SOURCE" \
+            bash -s <<'REMOTE'
           set -euo pipefail
-          cd ~/monglepick
+          cd "$VM2_PROJECT_DIR"
 
-          PREV_IMAGE_ID=\$(docker inspect --format='{{.Image}}' monglepick-recommend 2>/dev/null || echo "")
-          echo "직전 이미지: \$PREV_IMAGE_ID"
+          TS=$(date +%Y%m%d-%H%M%S)
+          echo ">>> [1/6] compose 파일 백업: docker-compose.prod.app.yml.bak.$TS"
+          cp docker-compose.prod.app.yml "docker-compose.prod.app.yml.bak.$TS"
 
-          docker pull ${{ env.IMAGE_NAME }}:$IMAGE_TAG
-          docker tag ${{ env.IMAGE_NAME }}:$IMAGE_TAG ${{ env.IMAGE_NAME }}:latest
+          echo ">>> [2/6] .env.prod → .env 동기화 (§6.3 Step 3-0)"
+          cp .env.prod .env
 
+          echo ">>> [3/6] compose image 교체 (service: $COMPOSE_SERVICE)"
+          python3 - <<PY
+          import re, sys, os
+          p = "docker-compose.prod.app.yml"
+          s = open(p).read()
+          service = os.environ["COMPOSE_SERVICE"]
+          new_image = f"{os.environ['IMAGE_NAME']}:{os.environ['IMAGE_TAG']}"
+          pattern = re.compile(
+              r'(^\s{2,4}' + re.escape(service) + r':\s*\n(?:\s{4,}.*\n)*?\s{4,}image:\s*)\S+',
+              re.MULTILINE,
+          )
+          s2, n = pattern.subn(r'\g<1>' + new_image, s, count=1)
+          if n == 0:
+              sys.stderr.write(f"ERROR: service {service} image 라인 찾지 못함\n")
+              sys.exit(1)
+          open(p, "w").write(s2)
+          print(f"image 교체 완료: {new_image}")
+          PY
+
+          echo ">>> [4/6] 이미지 pull + 서비스 재시작"
+          PREV_IMAGE_ID=$(docker inspect --format='{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
+          echo "    직전 이미지: $PREV_IMAGE_ID"
+          docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
           docker compose -f docker-compose.prod.app.yml --env-file .env.prod \
-            up -d --no-deps --force-recreate ${{ env.SERVICE_NAME }}
+            up -d --no-deps --force-recreate "$COMPOSE_SERVICE"
 
-          echo ">>> 헬스체크 대기..."
+          echo ">>> [5/6] 헬스체크 (최대 60초)"
           HEALTHY=false
-          for i in 1 2 3 4 5; do
-            if curl -sf ${{ env.HEALTHCHECK_URL }} > /dev/null 2>&1; then
-              echo "  ✅ Recommend OK (\$i/5)"
+          for i in $(seq 1 10); do
+            if curl -sf -m 3 "$HEALTHCHECK_URL" > /dev/null 2>&1; then
+              echo "    ✅ Recommend OK ($i/10)"
               HEALTHY=true
               break
             fi
-            echo "  ⏳ Recommend starting... (\$i/5)"
-            sleep 5
+            echo "    ⏳ Recommend starting... ($i/10)"
+            sleep 6
           done
 
-          if [ "\$HEALTHY" = "false" ]; then
-            echo "❌ 헬스체크 실패 → 롤백"
-            if [ -n "\$PREV_IMAGE_ID" ]; then
-              docker tag "\$PREV_IMAGE_ID" ${{ env.IMAGE_NAME }}:latest
-              docker compose -f docker-compose.prod.app.yml --env-file .env.prod \
-                up -d --no-deps --force-recreate ${{ env.SERVICE_NAME }}
-              echo "🔙 이전 이미지로 롤백 완료"
-            fi
+          if [ "$HEALTHY" = "false" ]; then
+            echo "❌ 헬스체크 실패 — compose 백업으로 롤백"
+            cp "docker-compose.prod.app.yml.bak.$TS" docker-compose.prod.app.yml
+            docker compose -f docker-compose.prod.app.yml --env-file .env.prod \
+              up -d --no-deps --force-recreate "$COMPOSE_SERVICE" || true
+            docker inspect "$CONTAINER_NAME" \
+              --format 'RestartCount={{.RestartCount}} Status={{.State.Status}}' || true
+            docker logs "$CONTAINER_NAME" --tail 80 2>&1 | head -80 || true
             exit 1
           fi
 
-          docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/${{ github.repository }}" || true
-          EOF
+          echo ">>> [6/6] 구 이미지/백업 정리"
+          docker image prune -f --filter "label=org.opencontainers.image.source=${REPO_SOURCE}" || true
+          find . -maxdepth 1 -name "docker-compose.prod.app.yml.bak.*" -type f -mtime +7 -delete || true
+
+          echo "✅ Recommend 배포 완료: ${IMAGE_NAME}:${IMAGE_TAG}"
+          REMOTE
