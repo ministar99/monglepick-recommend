@@ -565,3 +565,39 @@ class OnboardingStatusResponse(BaseModel):
     favorite_movies_completed: bool = Field(description="최애 영화 저장 완료 여부")
     favorite_genre_count: int = Field(description="저장된 선호 장르 개수")
     favorite_movie_count: int = Field(description="저장된 최애 영화 개수")
+    mood_selected: bool = Field(description="무드 선택 완료 여부")
+
+
+# =========================================
+# OCR 영수증 분석
+# =========================================
+
+class OcrAnalyzeRequest(BaseModel):
+    """영수증 OCR 분석 요청"""
+    image_url: str = Field(description="분석할 영수증 이미지 URL")
+    event_id: str | None = Field(default=None, description="OCR 이벤트 ID (로깅용)")
+
+
+class OcrAnalyzeResponse(BaseModel):
+    """영수증 OCR 분석 결과 — 6개 필드 개별 성공 여부 포함"""
+    success: bool = Field(description="OCR 텍스트 추출 성공 여부 (개별 필드와 독립)")
+    # 전체 상태: SUCCESS(영화명+관람일 모두) / PARTIAL_SUCCESS(1개 이상) / FAILED(없음)
+    status: str = Field(default="FAILED", description="전체 추출 상태")
+    movie_name: str | None = Field(default=None, description="추출된 영화명")
+    watch_date: str | None = Field(default=None, description="추출된 관람일 (YYYY-MM-DD)")
+    headcount: int | None = Field(default=None, description="추출된 관람 인원 수")
+    seat: str | None = Field(default=None, description="추출된 좌석 정보")
+    screening_time: str | None = Field(default=None, description="추출된 상영 시간 (HH:MM)")
+    theater: str | None = Field(default=None, description="추출된 상영관")
+    parsed_text: str | None = Field(default=None, description="OCR 원문 전체 텍스트")
+    confidence: float = Field(default=0.0, description="추출 신뢰도 (0.0~1.0)")
+    error_message: str | None = Field(default=None, description="오류 메시지 (실패 시)")
+    venue: str | None = Field(default=None, description="영화관 지점명 (예: CGV 홍대)")
+    watched_at: str | None = Field(default=None, description="관람일시 조합 (YYYY-MM-DD HH:MM)")
+    movie_name_ok: bool = Field(default=False, description="영화명 추출 성공 여부")
+    watch_date_ok: bool = Field(default=False, description="관람일 추출 성공 여부")
+    headcount_ok: bool = Field(default=False, description="인원 수 추출 성공 여부")
+    seat_ok: bool = Field(default=False, description="좌석 추출 성공 여부")
+    screening_time_ok: bool = Field(default=False, description="상영 시간 추출 성공 여부")
+    theater_ok: bool = Field(default=False, description="상영관 추출 성공 여부")
+    venue_ok: bool = Field(default=False, description="영화관 지점명 추출 성공 여부")
