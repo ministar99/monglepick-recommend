@@ -566,7 +566,6 @@ class OnboardingStatusResponse(BaseModel):
     favorite_movies_completed: bool = Field(description="최애 영화 저장 완료 여부")
     favorite_genre_count: int = Field(description="저장된 선호 장르 개수")
     favorite_movie_count: int = Field(description="저장된 최애 영화 개수")
-    mood_selected: bool = Field(description="무드 선택 완료 여부")
 
 
 # =========================================
