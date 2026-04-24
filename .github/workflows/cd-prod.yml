@@ -205,21 +205,20 @@ jobs:
           print(f"image 교체 완료: {new_image}")
           PY
 
-          # 2026-04-24: pull 전 VM2 디스크 자동 정리 (디스크 부족 사고 재발 방지)
-          # - dangling(<none>) 이미지 제거
-          # - 본 서비스 GHCR 이미지 중 최신 3개만 유지 (롤백 여지 확보, running 중은 docker 가 자동 보호)
-          # - 72h 이상 미사용 전역 이미지 제거
-          echo ">>> [3.5/6] 디스크 사전 정리"
+          # 2026-04-24: pull 전 디스크 자동 정리 — 정책: "running + 신규 = 최대 2개"
+          # VM2 디스크 여유 좁아 (8.7GB) 구 이미지 누적되면 pull 실패 반복.
+          # 본 서비스의 running 중이 아닌 모든 이미지 제거 → running 1개만 남김 → pull 후 정확히 2개.
+          # docker rmi 는 in-use 이미지를 자동 거부하므로 running 컨테이너는 보호된다.
+          echo ">>> [3.5/6] 디스크 사전 정리 (본 서비스 미사용 이미지 전부 제거)"
           echo "    [dangling] 태그 없는 이미지"
           docker image prune -f 2>&1 | tail -1 || true
-          echo "    [본 서비스 구 SHA 제거] ${IMAGE_NAME} 최신 3개 유지"
-          docker images "${IMAGE_NAME}" --format '{{.ID}} {{.CreatedAt}}' 2>/dev/null \
-            | sort -k2 -r | tail -n +4 | awk '{print $1}' | sort -u \
-            | xargs -r docker rmi 2>&1 | tail -3 || true
-          echo "    [72h+ 전역] 미사용 이미지"
-          docker image prune -a -f --filter "until=72h" 2>&1 | tail -1 || true
+          echo "    [본 서비스 미사용 이미지] running 제외 전부 제거"
+          docker images "${IMAGE_NAME}" -q 2>/dev/null | sort -u \
+            | xargs -r docker rmi 2>&1 | tail -5 || true
+          echo "    [전역 dangling + 24h 이상] 미사용 이미지"
+          docker image prune -a -f --filter "until=24h" 2>&1 | tail -1 || true
           echo "    [build cache]"
-          docker builder prune -f --filter "until=72h" 2>&1 | tail -1 || true
+          docker builder prune -f --filter "until=24h" 2>&1 | tail -1 || true
           echo "    정리 후 디스크:"
           df -h / | head -2
 
