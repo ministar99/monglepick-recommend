@@ -30,13 +30,19 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# curl (헬스체크) + libgl1 / libglib2.0-0 (PaddleOCR 의 cv2 가 libGL.so.1 요구) 설치
-# 2026-04-24: libGL.so.1 누락으로 컨테이너 기동 시 import cv2 에서 실패 — 운영 배포 실패 확인
+# curl(헬스체크) + tzdata(Asia/Seoul, QA #162/#177) + libgl1/libglib2.0-0(PaddleOCR cv2 libGL.so.1)
+# 2026-04-24: libGL.so.1 누락으로 컨테이너 기동 시 import cv2 실패 — 운영 배포 실패 확인
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
+        tzdata \
         libgl1 \
         libglib2.0-0 \
+    && ln -snf /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
+    && echo "Asia/Seoul" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
+
+# 기본 타임존 — docker-compose 에서 TZ 로 오버라이드 가능.
+ENV TZ=Asia/Seoul
 
 # 빌드 단계에서 생성된 가상환경 복사
 COPY --from=builder /app/.venv /app/.venv

@@ -4,10 +4,18 @@ OCR 영수증 분석 API
 엔드포인트:
     POST /api/v1/ocr/analyze       — 이미지 URL → 전체 OCR + 파싱
     POST /api/v1/ocr/debug-parse   — 텍스트 직접 입력 → 파싱 결과 + 라인별 원문
+                                     (운영 환경에서는 등록되지 않음)
     POST /api/v1/ocr/debug-ocr     — 이미지 URL → OCR 원문 + 파싱 결과 (디버그용)
+                                     (운영 환경에서는 등록되지 않음)
+
+보안:
+    debug-* 엔드포인트는 ENV 환경변수가 "production"/"prod" 인 경우
+    라우터에 등록되지 않는다. 운영 배포 시 .env 의 ENV=production 을 반드시
+    설정할 것. 로컬/스테이징에서는 그대로 노출되어 파서 디버깅을 지원한다.
 """
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
@@ -18,6 +26,11 @@ from app.service.ocr_service import extract_text_from_url
 from app.service.receipt_parser_service import parse_receipt, _normalize_ocr_text, _split_lines
 
 logger = logging.getLogger(__name__)
+
+# ENV 가 production/prod 인 경우 debug EP 를 등록하지 않는다.
+# "운영에서는 원문 텍스트와 파서 내부 상태가 외부로 노출되어선 안 된다"
+# 는 보안 원칙에 따른 가드. 스테이징/로컬은 기본 편의 유지.
+_IS_PRODUCTION: bool = os.getenv("ENV", "").lower() in {"production", "prod"}
 
 router = APIRouter(prefix="/ocr", tags=["OCR 영수증 분석"])
 
@@ -101,46 +114,52 @@ class DebugOcrResponse(BaseModel):
     parse_result: Dict[str, Any]
 
 
-@router.post("/debug-parse", response_model=DebugParseResponse, summary="텍스트 직접 파싱 테스트")
-def debug_parse(request: DebugParseRequest) -> DebugParseResponse:
-    """
-    OCR 없이 텍스트를 직접 입력해 파싱 결과를 확인한다.
-    영수증 원문을 붙여넣어 어떤 필드가 추출되는지 즉시 검증할 수 있다.
-    """
-    normalized = _normalize_ocr_text(request.text)
-    lines = _split_lines(normalized)
-    result = parse_receipt(request.text, fallback_texts=request.fallback_texts)
-    return DebugParseResponse(
-        lines=lines,
-        normalized_text=normalized,
-        parse_result=result,
-    )
+# debug 엔드포인트: 운영 환경에서는 라우터 등록 자체를 건너뛴다.
+# FastAPI 라우팅은 모듈 import 시 결정되므로, 운영 배포 시 ENV=production
+# 을 설정하면 OpenAPI 스펙에도 노출되지 않는다.
+if not _IS_PRODUCTION:
 
-
-@router.post("/debug-ocr", response_model=DebugOcrResponse, summary="이미지 OCR 원문 + 파싱 디버그")
-async def debug_ocr(request: DebugOcrRequest) -> DebugOcrResponse:
-    """
-    이미지 URL을 OCR한 뒤 원문 텍스트와 파싱 결과를 모두 반환한다.
-    admin에서 '왜 이 필드가 안 잡히나?' 디버깅용으로 사용한다.
-    """
-    logger.info("OCR 디버그 요청 — url=%s", request.image_url)
-    best_text, all_texts = await extract_text_from_url(request.image_url)
-
-    if best_text is None:
-        return DebugOcrResponse(
-            best_text=None,
-            all_variant_texts=all_texts,
-            lines=[],
-            parse_result={"error": "OCR 텍스트 추출 실패"},
+    @router.post("/debug-parse", response_model=DebugParseResponse, summary="텍스트 직접 파싱 테스트")
+    def debug_parse(request: DebugParseRequest) -> DebugParseResponse:
+        """
+        OCR 없이 텍스트를 직접 입력해 파싱 결과를 확인한다.
+        영수증 원문을 붙여넣어 어떤 필드가 추출되는지 즉시 검증할 수 있다.
+        """
+        normalized = _normalize_ocr_text(request.text)
+        lines = _split_lines(normalized)
+        result = parse_receipt(request.text, fallback_texts=request.fallback_texts)
+        return DebugParseResponse(
+            lines=lines,
+            normalized_text=normalized,
+            parse_result=result,
         )
 
-    normalized = _normalize_ocr_text(best_text)
-    lines = _split_lines(normalized)
-    result = parse_receipt(best_text, fallback_texts=all_texts)
+    @router.post("/debug-ocr", response_model=DebugOcrResponse, summary="이미지 OCR 원문 + 파싱 디버그")
+    async def debug_ocr(request: DebugOcrRequest) -> DebugOcrResponse:
+        """
+        이미지 URL을 OCR한 뒤 원문 텍스트와 파싱 결과를 모두 반환한다.
+        admin에서 '왜 이 필드가 안 잡히나?' 디버깅용으로 사용한다.
+        """
+        logger.info("OCR 디버그 요청 — url=%s", request.image_url)
+        best_text, all_texts = await extract_text_from_url(request.image_url)
 
-    return DebugOcrResponse(
-        best_text=best_text,
-        all_variant_texts=all_texts,
-        lines=lines,
-        parse_result=result,
-    )
+        if best_text is None:
+            return DebugOcrResponse(
+                best_text=None,
+                all_variant_texts=all_texts,
+                lines=[],
+                parse_result={"error": "OCR 텍스트 추출 실패"},
+            )
+
+        normalized = _normalize_ocr_text(best_text)
+        lines = _split_lines(normalized)
+        result = parse_receipt(best_text, fallback_texts=all_texts)
+
+        return DebugOcrResponse(
+            best_text=best_text,
+            all_variant_texts=all_texts,
+            lines=lines,
+            parse_result=result,
+        )
+else:
+    logger.info("OCR debug 엔드포인트 비활성화 — ENV=%s", os.getenv("ENV"))
