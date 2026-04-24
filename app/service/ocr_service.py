@@ -3,24 +3,58 @@
 
 이미지 전처리(gray 단일 변형) → PaddleOCR → 텍스트 추출
 gray 전처리: 회색조 + 중간 대비 + 노이즈 제거 + 샤픈
+
+보안 정책:
+  - SSRF 방어: image_url 은 http/https 만 허용하고, 호스트 해석 결과가 사설/
+    루프백/링크로컬/예약 대역이면 거부한다. 운영 환경은 _ALLOWED_HOSTS
+    환경변수(쉼표 구분)로 업로드 도메인만 허용하도록 구성할 수 있다.
+  - 이미지 크기 제한: 다운로드 스트림을 청크 단위로 누적하며 _MAX_IMAGE_BYTES
+    (기본 10MB) 초과 시 즉시 중단하여 메모리 폭발/DoS 를 방지한다.
 """
 import io
 import os
 import re
+import socket
+import ipaddress
 import logging
+import threading
 from typing import Optional, List, Tuple
+from urllib.parse import urlparse
 
 # PaddleOCR 시작 시 모델 서버 연결 체크를 건너뜀 (시작 속도 향상)
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 import numpy as np
 import httpx
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter
 from paddleocr import PaddleOCR
 
 logger = logging.getLogger(__name__)
 
+# ──────────────────────────────────────────────
+# 보안 설정 상수
+# ──────────────────────────────────────────────
+
+# SSRF 방어용 허용 스킴 — file://, gopher://, dict:// 등 전면 차단.
+_ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+# 이미지 다운로드 최대 크기 (바이트) — 기본 10MB. 초과 시 즉시 연결 중단.
+_MAX_IMAGE_BYTES: int = int(os.getenv("OCR_MAX_IMAGE_BYTES", 10 * 1024 * 1024))
+
+# 다운로드 타임아웃 (초) — 악성 slow-loris 방지 + 정상 업로드 여유 보장.
+_DOWNLOAD_TIMEOUT: float = float(os.getenv("OCR_DOWNLOAD_TIMEOUT", 15.0))
+
+# 도메인 화이트리스트 — 쉼표 구분. 미설정 시 IP 대역 차단만 적용하여
+# 로컬 개발 편의를 유지한다. 운영 환경은 반드시 업로드 도메인만 지정할 것.
+#   예: OCR_ALLOWED_HOSTS="cdn.monglepick.com,monglepick-uploads.s3.amazonaws.com"
+_ALLOWED_HOSTS: frozenset[str] = frozenset(
+    h.strip().lower() for h in os.getenv("OCR_ALLOWED_HOSTS", "").split(",") if h.strip()
+)
+
+# PaddleOCR 전역 싱글턴 초기화 보호용 락 — 다중 threadpool 워커가
+# 동시에 get_ocr_engine() 을 호출할 때 이중 로딩을 방지한다.
 _ocr_engine: Optional[PaddleOCR] = None
+_ocr_engine_lock = threading.Lock()
 
 # 짧은 변 기준 최소 해상도 (px) — 이 미만이면 업스케일
 _MIN_DIM = 800
@@ -31,8 +65,18 @@ _MIN_DIM = 800
 # ──────────────────────────────────────────────
 
 def get_ocr_engine() -> PaddleOCR:
+    """PaddleOCR 엔진 싱글턴을 반환한다.
+
+    FastAPI 는 sync 호출을 스레드풀에서 실행하므로, 콜드 스타트 시점에
+    동시 요청 2건이 들어오면 이중 초기화(모델 로딩 5~10초)가 발생한다.
+    `_ocr_engine_lock` 으로 double-checked locking 을 적용해 이를 방지한다.
+    """
     global _ocr_engine
-    if _ocr_engine is None:
+    if _ocr_engine is not None:
+        return _ocr_engine
+    with _ocr_engine_lock:
+        if _ocr_engine is not None:
+            return _ocr_engine
         logger.info("PaddleOCR 모델 초기화 중 (korean, PP-OCRv5)...")
         # PaddleOCR 3.x 에서는 paddlex 로거가 verbose 출력 — 억제
         logging.getLogger("ppocr").setLevel(logging.WARNING)
@@ -47,7 +91,7 @@ def get_ocr_engine() -> PaddleOCR:
             # PP-OCRv5_mobile_det 는 한글 텍스트 감지율이 낮아 제거
         )
         logger.info("PaddleOCR 모델 초기화 완료")
-    return _ocr_engine
+        return _ocr_engine
 
 
 # ──────────────────────────────────────────────
@@ -81,61 +125,6 @@ def _denoise_median(gray: Image.Image, size: int = 3) -> Image.Image:
     return gray.filter(ImageFilter.MedianFilter(size=size))
 
 
-def _denoise_gaussian(gray: Image.Image, radius: float = 0.8) -> Image.Image:
-    return gray.filter(ImageFilter.GaussianBlur(radius=radius))
-
-
-def _adaptive_threshold(gray: Image.Image, block_size: int = 31, c: int = 8) -> Image.Image:
-    """
-    OpenCV adaptiveThreshold 대응 — numpy + PIL 구현.
-    조명이 불균일한 영수증에서 글자 검출률을 높인다.
-    """
-    radius = block_size / 6.0
-    arr = np.array(gray, dtype=np.float32)
-    blurred = np.array(
-        gray.filter(ImageFilter.GaussianBlur(radius=radius)), dtype=np.float32
-    )
-    binary = np.where(arr >= blurred - c, 255, 0).astype(np.uint8)
-    result = Image.fromarray(binary)
-    return result.filter(ImageFilter.MaxFilter(3))
-
-
-def _deskew(img: Image.Image, angle_range: int = 5) -> Tuple[Image.Image, float]:
-    """
-    투영 프로파일 분산 최대화 방식 기울기 보정.
-    ±angle_range 도 범위를 0.5도 단위로 탐색.
-    """
-    gray_small = _to_gray(img).resize(
-        (img.width // 2, img.height // 2), Image.LANCZOS
-    )
-    arr = np.array(gray_small, dtype=np.float32)
-    mean_val = float(np.mean(arr))
-    binary = (arr < mean_val).astype(np.float32)
-
-    best_angle = 0.0
-    best_var = -1.0
-    angles = [a * 0.5 for a in range(-angle_range * 2, angle_range * 2 + 1)]
-
-    for angle in angles:
-        rotated = Image.fromarray((binary * 255).astype(np.uint8)).rotate(
-            angle, expand=False, fillcolor=0
-        )
-        proj = np.sum(np.array(rotated), axis=1)
-        var = float(np.var(proj))
-        if var > best_var:
-            best_var = var
-            best_angle = angle
-
-    if abs(best_angle) < 0.5:
-        return img, 0.0
-
-    corrected = img.rotate(
-        best_angle, expand=False,
-        fillcolor=(255, 255, 255) if img.mode == "RGB" else 255,
-    )
-    return corrected, best_angle
-
-
 def _to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -143,8 +132,12 @@ def _to_png_bytes(img: Image.Image) -> bytes:
 
 
 # ──────────────────────────────────────────────
-# 전처리 변형 6종
+# 전처리 — gray 단일 변형
 # ──────────────────────────────────────────────
+# 초기 설계에선 binary/adaptive/sharp/inverted/deskewed 등 6개 변형을 비교했으나,
+# 단일 요청 처리 시간이 120초 timeout 에 근접해 운영 안정성 문제가 있었고,
+# 실측 결과 gray 변형이 가장 안정적인 점수를 기록했다. gray 단일 변형만
+# 유지하여 첫 요청도 여유 있게 완료하도록 정리했다 (2026-04-23 리팩토링).
 
 def _preprocess_variant_gray(image_bytes: bytes) -> bytes:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -156,62 +149,6 @@ def _preprocess_variant_gray(image_bytes: bytes) -> bytes:
     gray = ImageEnhance.Brightness(gray).enhance(1.1)
     gray = gray.filter(ImageFilter.SHARPEN)
     return _to_png_bytes(gray)
-
-
-def _preprocess_variant_binary(image_bytes: bytes) -> bytes:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = _crop_receipt_center(img)
-    img = _resize_to_target(img)
-    gray = _to_gray(img)
-    gray = _denoise_median(gray)
-    gray = ImageEnhance.Contrast(gray).enhance(2.5)
-    bw = gray.point(lambda x: 255 if x > 160 else 0, mode="1").convert("L")
-    return _to_png_bytes(bw)
-
-
-def _preprocess_variant_adaptive(image_bytes: bytes) -> bytes:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = _crop_receipt_center(img)
-    img = _resize_to_target(img)
-    gray = _to_gray(img)
-    gray = _denoise_gaussian(gray, radius=0.8)
-    adaptive = _adaptive_threshold(gray, block_size=31, c=8)
-    return _to_png_bytes(adaptive)
-
-
-def _preprocess_variant_sharp(image_bytes: bytes) -> bytes:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = _crop_receipt_center(img)
-    img = _resize_to_target(img)
-    gray = _to_gray(img)
-    gray = ImageEnhance.Contrast(gray).enhance(1.8)
-    gray = gray.filter(ImageFilter.UnsharpMask(radius=2.0, percent=200, threshold=3))
-    gray = gray.filter(ImageFilter.SHARPEN)
-    return _to_png_bytes(gray)
-
-
-def _preprocess_variant_inverted(image_bytes: bytes) -> bytes:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = _crop_receipt_center(img)
-    img = _resize_to_target(img)
-    gray = _to_gray(img)
-    inverted = ImageOps.invert(gray)
-    inverted = _denoise_median(inverted)
-    inverted = ImageEnhance.Contrast(inverted).enhance(2.2)
-    inverted = inverted.filter(ImageFilter.SHARPEN)
-    return _to_png_bytes(inverted)
-
-
-def _preprocess_variant_deskewed(image_bytes: bytes) -> Tuple[bytes, float]:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = _crop_receipt_center(img)
-    img = _resize_to_target(img)
-    corrected, angle = _deskew(img)
-    gray = _to_gray(corrected)
-    gray = _denoise_median(gray)
-    gray = ImageEnhance.Contrast(gray).enhance(2.0)
-    gray = gray.filter(ImageFilter.SHARPEN)
-    return _to_png_bytes(gray), angle
 
 
 # ──────────────────────────────────────────────
@@ -307,7 +244,7 @@ def _build_lines_from_paddleocr(result) -> str:
 
 
 # ──────────────────────────────────────────────
-# 메인 OCR 실행 — 6개 변형 비교
+# 메인 OCR 실행 — gray 단일 변형
 # ──────────────────────────────────────────────
 
 def _ocr_with_best_variant(image_bytes: bytes) -> Tuple[Optional[str], List[str]]:
@@ -382,6 +319,107 @@ def _log_variant_comparison(
 
 
 # ──────────────────────────────────────────────
+# 보안 — SSRF 방어 + 스트리밍 크기 제한
+# ──────────────────────────────────────────────
+
+class UnsafeImageUrlError(ValueError):
+    """SSRF 방어에 의해 거부된 URL 입력 오류."""
+
+
+def _validate_image_url(image_url: str) -> str:
+    """SSRF 방어: scheme/host/IP 대역 검증 후 정제된 URL 을 반환한다.
+
+    거부 기준:
+      1. scheme 가 http/https 이외
+      2. 호스트명이 비어있거나 해석 실패
+      3. 해석된 IP 가 사설/루프백/링크로컬/예약/멀티캐스트 대역
+      4. `OCR_ALLOWED_HOSTS` 설정 시 허용 목록에 없는 호스트
+
+    참고: DNS TOCTOU 완화를 위해 운영에서는 반드시 도메인 화이트리스트를
+    설정해 이 함수가 IP 레벨 검증만이 아니라 호스트 일치도 요구하게 한다.
+    """
+    parsed = urlparse(image_url)
+
+    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+        raise UnsafeImageUrlError(f"허용되지 않는 스킴: {parsed.scheme!r}")
+
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise UnsafeImageUrlError("호스트명이 비어 있습니다")
+
+    # 화이트리스트가 설정된 경우 호스트명 일치 여부를 먼저 검증한다.
+    if _ALLOWED_HOSTS and host not in _ALLOWED_HOSTS:
+        raise UnsafeImageUrlError(f"허용되지 않은 호스트: {host!r}")
+
+    # 호스트명 → IP 해석 후 사설/예약 대역 차단 (A/AAAA 레코드 모두 검사).
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        raise UnsafeImageUrlError(f"호스트 해석 실패: {host!r} ({e})") from e
+
+    for info in infos:
+        ip_str = info[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            # 해석 결과가 IP 형태가 아닐 수 없으나, 방어적으로 스킵.
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise UnsafeImageUrlError(
+                f"내부/예약 IP 대역은 허용되지 않습니다: {host!r} → {ip_str}"
+            )
+
+    return image_url
+
+
+async def _download_image_bytes(image_url: str) -> Optional[bytes]:
+    """크기 제한을 강제하며 이미지 바이트를 스트리밍 다운로드한다.
+
+    - Content-Length 가 선언된 경우 선검증으로 커넥션을 즉시 끊는다.
+    - 선언이 없거나 신뢰할 수 없으면 청크 누적 중 임계치 도달 시 중단한다.
+    - 반환값 None 은 다운로드 실패 또는 크기 초과를 의미한다.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=False) as client:
+            async with client.stream("GET", image_url) as response:
+                response.raise_for_status()
+
+                content_length = response.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > _MAX_IMAGE_BYTES:
+                            logger.warning(
+                                "이미지 크기 초과(선언) — Content-Length=%s limit=%d",
+                                content_length, _MAX_IMAGE_BYTES,
+                            )
+                            return None
+                    except ValueError:
+                        # Content-Length 가 숫자가 아닌 비정상 헤더면 무시하고 스트림 검증으로 대체.
+                        pass
+
+                buf = bytearray()
+                async for chunk in response.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > _MAX_IMAGE_BYTES:
+                        logger.warning(
+                            "이미지 크기 초과(스트림) — 누적=%d limit=%d",
+                            len(buf), _MAX_IMAGE_BYTES,
+                        )
+                        return None
+                return bytes(buf)
+    except httpx.HTTPError as e:
+        logger.error("이미지 다운로드 실패 url=%s error=%s", image_url, e)
+        return None
+
+
+# ──────────────────────────────────────────────
 # 공개 API
 # ──────────────────────────────────────────────
 
@@ -393,28 +431,31 @@ async def extract_text_from_url(image_url: str) -> Tuple[Optional[str], List[str
     """
     이미지 URL에서 텍스트를 추출한다.
 
+    SSRF/DoS 방어:
+      1. `_validate_image_url` 로 스킴·호스트·IP 대역 검증
+      2. `_download_image_bytes` 로 스트리밍 크기 제한 적용
+
     Returns:
-        best_text         — 최고 품질 변형의 텍스트 (실패 시 None)
-        all_variant_texts — 모든 변형 텍스트 (필드 폴백 추출용)
+        best_text         — OCR 텍스트 (실패·거부 시 None)
+        all_variant_texts — 변형 텍스트 리스트 (필드 폴백 추출용)
     """
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(image_url)
-            response.raise_for_status()
-            image_bytes = response.content
+        _validate_image_url(image_url)
+    except UnsafeImageUrlError as e:
+        logger.warning("OCR URL 거부 — %s", e)
+        return None, []
 
+    image_bytes = await _download_image_bytes(image_url)
+    if not image_bytes:
+        return None, []
+
+    try:
         best_text, all_texts = _ocr_with_best_variant(image_bytes)
-
         if not best_text:
             logger.warning("OCR 추출 결과 없음")
             return None, []
-
         logger.info("OCR 추출 완료 — 글자 수: %d", len(best_text))
         return best_text, all_texts
-
-    except httpx.HTTPError as e:
-        logger.error("이미지 다운로드 실패 url=%s error=%s", image_url, e)
-        return None, []
     except Exception as e:
         logger.error("OCR 처리 오류: %s", e)
         return None, []
