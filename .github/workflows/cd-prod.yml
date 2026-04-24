@@ -205,10 +205,28 @@ jobs:
           print(f"image 교체 완료: {new_image}")
           PY
 
+          # 2026-04-24: pull 전 VM2 디스크 자동 정리 (디스크 부족 사고 재발 방지)
+          # - dangling(<none>) 이미지 제거
+          # - 본 서비스 GHCR 이미지 중 최신 3개만 유지 (롤백 여지 확보, running 중은 docker 가 자동 보호)
+          # - 72h 이상 미사용 전역 이미지 제거
+          echo ">>> [3.5/6] 디스크 사전 정리"
+          echo "    [dangling] 태그 없는 이미지"
+          docker image prune -f 2>&1 | tail -1 || true
+          echo "    [본 서비스 구 SHA 제거] ${IMAGE_NAME} 최신 3개 유지"
+          docker images "${IMAGE_NAME}" --format '{{.ID}} {{.CreatedAt}}' 2>/dev/null \
+            | sort -k2 -r | tail -n +4 | awk '{print $1}' | sort -u \
+            | xargs -r docker rmi 2>&1 | tail -3 || true
+          echo "    [72h+ 전역] 미사용 이미지"
+          docker image prune -a -f --filter "until=72h" 2>&1 | tail -1 || true
+          echo "    [build cache]"
+          docker builder prune -f --filter "until=72h" 2>&1 | tail -1 || true
+          echo "    정리 후 디스크:"
+          df -h / | head -2
+
           echo ">>> [4/6] 이미지 pull + 서비스 재시작"
           PREV_IMAGE_ID=$(docker inspect --format='{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
           echo "    직전 이미지: $PREV_IMAGE_ID"
-          # 2026-04-24: pull 실패 시 compose 파일이 이미 sed 교체된 상태라 up 도 실패하는 악순환 방지.
+          # pull 실패 시 compose 파일이 이미 sed 교체된 상태라 up 도 실패하는 악순환 방지.
           # pull 단계에서 즉시 백업 복원 후 exit — 다음 실행도 깨끗한 상태.
           if ! docker pull "${IMAGE_NAME}:${IMAGE_TAG}"; then
             echo "❌ GHCR pull 실패 — compose 파일 즉시 복원 후 종료 (up 시도 안 함)"
