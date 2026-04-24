@@ -208,7 +208,15 @@ jobs:
           echo ">>> [4/6] 이미지 pull + 서비스 재시작"
           PREV_IMAGE_ID=$(docker inspect --format='{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
           echo "    직전 이미지: $PREV_IMAGE_ID"
-          docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+          # 2026-04-24: pull 실패 시 compose 파일이 이미 sed 교체된 상태라 up 도 실패하는 악순환 방지.
+          # pull 단계에서 즉시 백업 복원 후 exit — 다음 실행도 깨끗한 상태.
+          if ! docker pull "${IMAGE_NAME}:${IMAGE_TAG}"; then
+            echo "❌ GHCR pull 실패 — compose 파일 즉시 복원 후 종료 (up 시도 안 함)"
+            cp "docker-compose.prod.app.yml.bak.$TS" docker-compose.prod.app.yml
+            echo "    복원된 image 라인:"
+            grep -E "^\s{4,}image:" docker-compose.prod.app.yml || true
+            exit 1
+          fi
           docker compose -f docker-compose.prod.app.yml --env-file .env.prod \
             up -d --no-deps --force-recreate "$COMPOSE_SERVICE"
 
