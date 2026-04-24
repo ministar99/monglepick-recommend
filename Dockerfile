@@ -30,8 +30,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# curl 설치 (헬스체크용)
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+# curl (헬스체크) + libgl1 / libglib2.0-0 (PaddleOCR 의 cv2 가 libGL.so.1 요구) 설치
+# 2026-04-24: libGL.so.1 누락으로 컨테이너 기동 시 import cv2 에서 실패 — 운영 배포 실패 확인
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        libgl1 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # 빌드 단계에서 생성된 가상환경 복사
