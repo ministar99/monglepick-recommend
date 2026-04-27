@@ -132,6 +132,8 @@ def _normalize_ocr_text(text: str) -> str:
     text = re.sub(r"([A-Z]\d+)O\b", r"\g<1>0", text)
     # 시간 구분자 혼용 정규화: "14.30" → "14:30" (날짜가 아닌 시간 문맥)
     text = re.sub(r"\b(\d{1,2})\.(\d{2})\b(?!\s*[./-]\d)", r"\1:\2", text)
+    # Tesseract: 콜론 뒤 공백 → 제거: "20: 10" → "20:10", "9 : 52" → "9:52"
+    text = re.sub(r"\b(\d{1,2})\s*:\s+(\d{2})\b", r"\1:\2", text)
     # 전각 문자 → 반각
     text = text.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
 
@@ -205,11 +207,16 @@ def _is_bad_movie_candidate(name: str) -> bool:
         return True
     compact = name.replace(" ", "").lower()
     hard_bad = {
-        "영화입장권", "입장권", "영수증겸용", "전체발권", "영수증", "매출전표",
+        "영화입장권", "입장권", "영수증겸용", "전체발권", "발권", "영수증", "매출전표",
         "결제", "승인", "카드", "합계", "총금액", "좌석", "상영관",
         "관람일", "출력일", "총인원", "상영시간", "영화정보",
+        "kiosk", "total", "환불", "매점", "부가세",
     }
     if any(kw.replace(" ", "").lower() in compact for kw in hard_bad):
+        return True
+    # 권종 단독 표기 (정확히 일치) — 영화명 아님
+    ticket_types = {"일반", "청소년", "우대", "성인", "군인", "경로"}
+    if compact in ticket_types:
         return True
     if "관람가" in compact or "관람불가" in compact:
         return True
@@ -226,7 +233,7 @@ def _is_bad_movie_candidate(name: str) -> bool:
 def _score_movie_candidate(name: str, source: str) -> float:
     cleaned = _clean_movie_candidate(name)
     score = {
-        "labeled": 1.2, "special": 0.9, "after_rating": 1.7,
+        "labeled": 1.2, "special": 0.9, "after_rating": 2.2,
         "korean_before_english": 1.8, "title_pair": 1.7,
         "english_title": 1.4, "line": 0.5,
     }.get(source, 0.0)
@@ -557,6 +564,19 @@ def _validate_time(t: str) -> Optional[str]:
 # ──────────────────────────────────────────────
 def _extract_screening_time(text: str) -> Optional[str]:
     normalized = _normalize_ocr_text(text)
+
+    # 0순위: 상단 헤더 첫 4줄 — KIOSK 발권 영수증 "2017-10-06 20:10(KIOSK6)" 형태
+    # 레이블이 없어도 헤더 날짜+시간을 가장 신뢰할 수 있는 상영 시각으로 우선 처리
+    for line in _split_lines(normalized)[:4]:
+        for pat in [
+            r"\d{4}[./-]\d{1,2}[./-]\d{1,2}\s+(\d{1,2}:\d{2})",
+            r"\d{2}[./-]\d{1,2}[./-]\d{1,2}\s+(\d{1,2}:\d{2})",
+        ]:
+            m = re.search(pat, line)
+            if m:
+                result = _validate_time(m.group(1))
+                if result:
+                    return result
 
     # 1순위: 관람일시/상영일시 레이블에 포함된 시간 — "2026/04/10 14:30"
     for pat in [
