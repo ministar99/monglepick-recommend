@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata \
         libgl1 \
         libglib2.0-0 \
+        libgomp1 \
     && ln -snf /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
     && echo "Asia/Seoul" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*

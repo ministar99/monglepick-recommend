@@ -23,6 +23,10 @@ from urllib.parse import urlparse
 
 # PaddleOCR 시작 시 모델 서버 연결 체크를 건너뜀 (시작 속도 향상)
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+# PaddleOCR 3.4.x + PaddlePaddle 3.3.x PIR/oneDNN 충돌 방지
+# ConvertPirAttribute / onednn_instruction.cc 오류를 막기 위해 import 전에 설정
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ.setdefault("FLAGS_enable_pir_api", "0")
 
 import numpy as np
 import httpx
