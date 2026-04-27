@@ -109,11 +109,13 @@ class SearchService:
 
         es_movies: list[ESSearchMovieItem] | None = None
         total = 0
-        if keyword_cleaned is not None:
+        if keyword_cleaned is not None or is_genre_discovery_search:
             es_result = await self._search_es.search_movies(
                 keyword=keyword_cleaned,
                 search_type=search_type,
-                genre=genre,
+                genre=genre if keyword_cleaned is not None else None,
+                genres=selected_genres if is_genre_discovery_search else None,
+                genre_match_groups=selected_genre_alias_groups if is_genre_discovery_search else None,
                 year_from=year_from,
                 year_to=year_to,
                 rating_min=rating_min,
