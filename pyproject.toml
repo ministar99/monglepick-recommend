@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "aiohttp>=3.11.0,<4.0.0",
     "aiomysql>=0.3.2",
+    "cryptography>=46.0.0",
     # 2026-04-07 신규: 좋아요 write-behind flush 스케줄러용 (주기적 Redis→MySQL 배치 반영)
     "apscheduler>=3.10.4",
     "elasticsearch>=8.15.0,<9.0.0",
@@ -20,9 +21,7 @@ dependencies = [
     "redis>=7.3.0",
     "sqlalchemy[asyncio]>=2.0.48",
     "uvicorn>=0.41.0",
-    "paddleocr>=2.7.0",
-    "paddlepaddle>=2.6.0",
-    "numpy>=1.24.0",
+    "pytesseract>=0.3.10",
     "pillow>=10.0.0",
 ]
 

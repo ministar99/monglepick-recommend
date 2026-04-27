@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_camel
 
 
 # =========================================
@@ -580,6 +581,11 @@ class OcrAnalyzeRequest(BaseModel):
 
 class OcrAnalyzeResponse(BaseModel):
     """영수증 OCR 분석 결과 — 6개 필드 개별 성공 여부 포함"""
+    model_config = ConfigDict(
+        populate_by_name=True,
+        alias_generator=to_camel,
+    )
+
     success: bool = Field(description="OCR 텍스트 추출 성공 여부 (개별 필드와 독립)")
     # 전체 상태: SUCCESS(영화명+관람일 모두) / PARTIAL_SUCCESS(1개 이상) / FAILED(없음)
     status: str = Field(default="FAILED", description="전체 추출 상태")
