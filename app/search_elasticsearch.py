@@ -1,7 +1,7 @@
 """
 검색 전용 Elasticsearch 래퍼.
 
-자동완성과 키워드 영화 검색에서만 사용하며,
+자동완성과 영화 검색에서 사용하며,
 예외는 외부로 올리지 않고 서비스 레이어에서 MySQL 폴백 판단에 사용한다.
 """
 
@@ -226,9 +226,11 @@ class ElasticsearchSearchClient:
     async def search_movies(
         self,
         *,
-        keyword: str,
+        keyword: str | None,
         search_type: str,
         genre: str | None,
+        genres: list[str] | None = None,
+        genre_match_groups: list[list[str]] | None = None,
         year_from: int | None,
         year_to: int | None,
         rating_min: float | None,
@@ -244,8 +246,18 @@ class ElasticsearchSearchClient:
         if not self.is_available():
             return None
 
-        keyword_cleaned = keyword.strip()
-        if not keyword_cleaned:
+        keyword_cleaned = keyword.strip() if isinstance(keyword, str) and keyword.strip() else None
+        normalized_genres = [genre_name for genre_name in (genres or []) if genre_name]
+        normalized_genre_match_groups = [
+            [alias for alias in alias_group if alias]
+            for alias_group in (genre_match_groups or [])
+            if alias_group
+        ]
+        is_genre_discovery_search = keyword_cleaned is None and bool(
+            normalized_genres or normalized_genre_match_groups
+        )
+
+        if keyword_cleaned is None and not is_genre_discovery_search:
             return None
 
         try:
@@ -266,45 +278,46 @@ class ElasticsearchSearchClient:
 
             response = await client.search(
                 index=self._settings.ELASTICSEARCH_INDEX,
-                body={
-                    "from": (page - 1) * size,
-                    "size": size,
-                    "query": self._build_movie_query(
-                        keyword=keyword_cleaned,
-                        search_type=search_type,
-                        genre=genre,
-                        year_from=year_from,
-                        year_to=year_to,
-                        rating_min=rating_min,
-                        rating_max=rating_max,
-                        popularity_min=popularity_min,
-                        popularity_max=popularity_max,
-                        vote_count_min=vote_count_min,
-                        capabilities=capabilities,
-                    ),
-                    "sort": self._build_sort(
-                        sort_by=sort_by,
-                        sort_order=sort_order,
-                        capabilities=capabilities,
-                    ),
-                    "suggest": self._build_suggest_body(keyword_cleaned, capabilities),
-                },
+                body=self._build_search_body(
+                    keyword=keyword_cleaned,
+                    search_type=search_type,
+                    genre=genre,
+                    genres=normalized_genres,
+                    genre_match_groups=normalized_genre_match_groups,
+                    year_from=year_from,
+                    year_to=year_to,
+                    rating_min=rating_min,
+                    rating_max=rating_max,
+                    popularity_min=popularity_min,
+                    popularity_max=popularity_max,
+                    vote_count_min=vote_count_min,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                    page=page,
+                    size=size,
+                    capabilities=capabilities,
+                    prioritize_score=is_genre_discovery_search,
+                ),
             )
         except Exception as exc:
             self._log_es_failure("search_es_movie_query_failed", exc)
             return None
 
-        did_you_mean, completion_suggestions, phrase_suggestions = self._extract_suggestions(
-            response,
-            original=keyword_cleaned,
-        )
-        prefix_hits = self._extract_prefix_hits(response, original=keyword_cleaned)
-        related_queries = self._dedupe_suggestions(
-            completion_suggestions + prefix_hits + phrase_suggestions,
-            original=keyword_cleaned,
-            limit=6,
-            exclude={did_you_mean} if did_you_mean else None,
-        )
+        if keyword_cleaned is not None:
+            did_you_mean, completion_suggestions, phrase_suggestions = self._extract_suggestions(
+                response,
+                original=keyword_cleaned,
+            )
+            prefix_hits = self._extract_prefix_hits(response, original=keyword_cleaned)
+            related_queries = self._dedupe_suggestions(
+                completion_suggestions + prefix_hits + phrase_suggestions,
+                original=keyword_cleaned,
+                limit=6,
+                exclude={did_you_mean} if did_you_mean else None,
+            )
+        else:
+            did_you_mean = None
+            related_queries = []
 
         hits = response.get("hits", {}).get("hits", [])
         total_raw = response.get("hits", {}).get("total", 0)
@@ -316,6 +329,70 @@ class ElasticsearchSearchClient:
             did_you_mean=did_you_mean,
             related_queries=related_queries,
         )
+
+    def _build_search_body(
+        self,
+        *,
+        keyword: str | None,
+        search_type: str,
+        genre: str | None,
+        genres: list[str] | None,
+        genre_match_groups: list[list[str]] | None,
+        year_from: int | None,
+        year_to: int | None,
+        rating_min: float | None,
+        rating_max: float | None,
+        popularity_min: float | None,
+        popularity_max: float | None,
+        vote_count_min: int | None,
+        sort_by: str,
+        sort_order: str,
+        page: int,
+        size: int,
+        capabilities: ESIndexCapabilities,
+        prioritize_score: bool,
+    ) -> dict:
+        query = (
+            self._build_movie_query(
+                keyword=keyword,
+                search_type=search_type,
+                genre=genre,
+                year_from=year_from,
+                year_to=year_to,
+                rating_min=rating_min,
+                rating_max=rating_max,
+                popularity_min=popularity_min,
+                popularity_max=popularity_max,
+                vote_count_min=vote_count_min,
+                capabilities=capabilities,
+            )
+            if keyword is not None
+            else self._build_genre_discovery_query(
+                genres=genres or [],
+                genre_match_groups=genre_match_groups or [],
+                year_from=year_from,
+                year_to=year_to,
+                rating_min=rating_min,
+                rating_max=rating_max,
+                popularity_min=popularity_min,
+                popularity_max=popularity_max,
+                vote_count_min=vote_count_min,
+            )
+        )
+        body = {
+            "from": (page - 1) * size,
+            "size": size,
+            "query": query,
+            "sort": self._build_sort(
+                sort_by=sort_by,
+                sort_order=sort_order,
+                capabilities=capabilities,
+                prioritize_score=prioritize_score,
+            ),
+        }
+        if keyword is not None:
+            body["suggest"] = self._build_suggest_body(keyword, capabilities)
+        return body
 
     def _get_client(self) -> AsyncElasticsearch:
         cls = type(self)
@@ -403,6 +480,130 @@ class ElasticsearchSearchClient:
             SEARCH_TYPE_FIELDS.get(search_type, SEARCH_TYPE_FIELDS["title"]),
             capabilities,
         )
+        filters = self._build_common_filters(
+            genre=genre,
+            year_from=year_from,
+            year_to=year_to,
+            rating_min=rating_min,
+            rating_max=rating_max,
+            popularity_min=popularity_min,
+            popularity_max=popularity_max,
+            vote_count_min=vote_count_min,
+        )
+
+        return {
+            "bool": {
+                "must": [
+                    {
+                        "multi_match": {
+                            "query": keyword,
+                            "fields": fields,
+                            "type": "best_fields",
+                            "fuzziness": "AUTO",
+                            "prefix_length": 1,
+                            "max_expansions": 25,
+                            "tie_breaker": 0.3,
+                        }
+                    }
+                ],
+                "filter": filters,
+                "should": [
+                    {"match_phrase": {field: {"query": keyword, "boost": 4.0}}}
+                    for field in EXACT_PHRASE_FIELDS
+                ],
+            }
+        }
+
+    def _build_genre_discovery_query(
+        self,
+        *,
+        genres: list[str],
+        genre_match_groups: list[list[str]],
+        year_from: int | None,
+        year_to: int | None,
+        rating_min: float | None,
+        rating_max: float | None,
+        popularity_min: float | None,
+        popularity_max: float | None,
+        vote_count_min: int | None,
+    ) -> dict:
+        should_clauses = self._build_genre_score_clauses(
+            genres=genres,
+            genre_match_groups=genre_match_groups,
+        )
+        return {
+            "bool": {
+                "filter": self._build_common_filters(
+                    genre=None,
+                    year_from=year_from,
+                    year_to=year_to,
+                    rating_min=rating_min,
+                    rating_max=rating_max,
+                    popularity_min=popularity_min,
+                    popularity_max=popularity_max,
+                    vote_count_min=vote_count_min,
+                ),
+                "should": should_clauses,
+                "minimum_should_match": 1,
+            }
+        }
+
+    def _build_genre_score_clauses(
+        self,
+        *,
+        genres: list[str],
+        genre_match_groups: list[list[str]],
+    ) -> list[dict]:
+        score_clauses: list[dict] = []
+
+        if genre_match_groups:
+            for alias_group in genre_match_groups:
+                unique_aliases = [alias for alias in dict.fromkeys(alias_group) if alias]
+                if not unique_aliases:
+                    continue
+                score_clauses.append(
+                    {
+                        "constant_score": {
+                            "filter": {
+                                "bool": {
+                                    "should": [
+                                        {"term": {"genres": alias}}
+                                        for alias in unique_aliases
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            },
+                            "boost": 1.0,
+                        }
+                    }
+                )
+
+        if score_clauses:
+            return score_clauses
+
+        return [
+            {
+                "constant_score": {
+                    "filter": {"term": {"genres": genre_name}},
+                    "boost": 1.0,
+                }
+            }
+            for genre_name in dict.fromkeys(genres)
+            if genre_name
+        ]
+
+    def _build_common_filters(
+        self,
+        *,
+        genre: str | None,
+        year_from: int | None,
+        year_to: int | None,
+        rating_min: float | None,
+        rating_max: float | None,
+        popularity_min: float | None = None,
+        popularity_max: float | None = None,
+        vote_count_min: int | None,
+    ) -> list[dict]:
         filters: list[dict] = [
             {"bool": {"must_not": {"term": {"adult": True}}}},
             {
@@ -437,28 +638,7 @@ class ElasticsearchSearchClient:
         if vote_count_min is not None:
             filters.append({"range": {"vote_count": {"gte": vote_count_min}}})
 
-        return {
-            "bool": {
-                "must": [
-                    {
-                        "multi_match": {
-                            "query": keyword,
-                            "fields": fields,
-                            "type": "best_fields",
-                            "fuzziness": "AUTO",
-                            "prefix_length": 1,
-                            "max_expansions": 25,
-                            "tie_breaker": 0.3,
-                        }
-                    }
-                ],
-                "filter": filters,
-                "should": [
-                    {"match_phrase": {field: {"query": keyword, "boost": 4.0}}}
-                    for field in EXACT_PHRASE_FIELDS
-                ],
-            }
-        }
+        return filters
 
     def _build_sort(
         self,
@@ -466,27 +646,37 @@ class ElasticsearchSearchClient:
         sort_by: str,
         sort_order: str,
         capabilities: ESIndexCapabilities,
+        prioritize_score: bool = False,
     ) -> list[dict]:
         direction = "asc" if sort_order == "asc" else "desc"
         if sort_by == "rating":
-            return [
+            sort = [
                 {"rating": {"order": direction, "missing": "_last"}},
                 {"vote_count": {"order": "desc", "missing": "_last"}},
                 {"_score": {"order": "desc"}},
             ]
+            if prioritize_score:
+                return [{"_score": {"order": "desc"}}] + sort[:-1]
+            return sort
         if sort_by == "release_date":
-            return [
+            sort = [
                 {"release_year": {"order": direction, "missing": "_last"}},
                 {"_score": {"order": "desc"}},
             ]
+            if prioritize_score:
+                return [{"_score": {"order": "desc"}}] + sort[:-1]
+            return sort
         if sort_by == "title":
             if not capabilities.has_title_sort:
                 return []
-            return [
+            sort = [
                 {"title_sort": {"order": direction, "missing": "_last"}},
                 {"release_year": {"order": "desc", "missing": "_last"}},
                 {"_score": {"order": "desc"}},
             ]
+            if prioritize_score:
+                return [{"_score": {"order": "desc"}}] + sort[:-1]
+            return sort
         return [
             {"_score": {"order": "desc"}},
             {"rating": {"order": "desc", "missing": "_last"}},
