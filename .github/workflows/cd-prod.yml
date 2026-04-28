@@ -118,6 +118,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # 2026-04-28 — GHA 빌드 캐시 비활성화.
+      # 사고 이력: PaddleOCR→Tesseract 의존성 전환(`e4c1e11`) 후 푸시된 이미지(SHA `c09f560`)의
+      # builder stage `RUN uv sync --frozen` layer 가 OCR 도입 *이전* 시점 캐시 layer 를 잘못
+      # 재사용해 `pytesseract`/`paddle` 둘 다 누락된 .venv 가 만들어졌고 운영 컨테이너 부팅 실패
+      # (`ModuleNotFoundError: pytesseract`) → RestartCount=30 → 자동 롤백된 직전 이미지도 같은
+      # 결함이라 운영 recommend 전체 다운. pyproject/uv.lock content sha 가 바뀌어도 cache-from
+      # 매니페스트에서 stale layer 가 매칭되는 사례 확인됨(빌드 로그 #14 가 0.7s 만에 종료).
+      # 매번 풀 빌드해도 컨테이너 30~50초 수준이라 신뢰성 우선으로 캐시 제거.
       - name: Build and push (linux/amd64)
         if: env.SKIP_BUILD == 'false'
         uses: docker/build-push-action@v6
@@ -128,8 +136,7 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.resolve.outputs.tag }}
             ${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: true
 
   deploy:
     name: Deploy to VM2
