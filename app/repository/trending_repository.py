@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.model.entity import TrendingKeyword
@@ -56,18 +55,8 @@ class TrendingRepository:
                 last_searched_at=stmt.inserted.last_searched_at,
             )
         elif dialect_name == "sqlite":
-            stmt = sqlite_insert(TrendingKeyword).values(
-                keyword=keyword_cleaned,
-                search_count=1,
-                last_searched_at=now,
-            )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[TrendingKeyword.keyword],
-                set_={
-                    "search_count": TrendingKeyword.search_count + 1,
-                    "last_searched_at": stmt.excluded.last_searched_at,
-                },
-            )
+            # SQLite는 DateTime 비교가 방언별로 미묘해 명시적 SELECT→UPDATE 경로를 사용합니다.
+            return await self._increment_legacy(keyword_cleaned, now)
         else:
             return await self._increment_legacy(keyword_cleaned, now)
 
@@ -81,7 +70,11 @@ class TrendingRepository:
         )
         return result.scalar_one()
 
-    async def _increment_legacy(self, keyword: str, now: datetime) -> TrendingKeyword:
+    async def _increment_legacy(
+        self,
+        keyword: str,
+        now: datetime,
+    ) -> TrendingKeyword:
         """
         sqlite/mysql 외 테스트성 dialect를 위한 폴백 구현입니다.
 
@@ -93,7 +86,7 @@ class TrendingRepository:
         existing = result.scalar_one_or_none()
 
         if existing:
-            existing.search_count += 1
+            existing.search_count = existing.search_count + 1
             existing.last_searched_at = now
             self._session.add(existing)
             await self._session.flush()

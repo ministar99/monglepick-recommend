@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.v2.api.deps import get_conn, get_current_user, get_current_user_optional, get_redis_client
 from app.model.schema import (
+    AdminPopularKeywordsResponse,
     AutocompleteResponse,
     MovieDetailResponse,
     MovieSearchResponse,
@@ -193,6 +194,26 @@ async def get_trending(
     """인기 검색어 엔드포인트 (인증 불필요)"""
     service = TrendingService(conn, redis)
     return await service.get_trending()
+
+
+@router.get(
+    "/admin/popular",
+    response_model=AdminPopularKeywordsResponse,
+    summary="관리자 검색 분석용 인기 검색어",
+    description=(
+        "trending_keywords를 키워드 후보/검색 수/정렬 기준으로 사용하고, "
+        "search_history를 기간별 전환율 계산에 사용합니다."
+    ),
+)
+async def get_admin_popular_keywords(
+    period: str = Query(default="7d", description="집계 기간 (1d/7d/30d)"),
+    limit: int = Query(default=20, description="최대 반환 개수", ge=1, le=100),
+    conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis = Depends(get_redis_client),
+):
+    """관리자 화면용 인기 검색어 집계 엔드포인트 (인증 불필요, 내부 호출 용도)."""
+    service = TrendingService(conn, redis)
+    return await service.get_admin_popular_keywords(period=period, limit=limit)
 
 
 @router.get(
