@@ -166,3 +166,38 @@ class SearchHistoryRepository:
         async with self._conn.cursor() as cur:
             await cur.execute(sql, (user_id,))
             return cur.rowcount
+
+    async def get_keyword_stats_since(
+        self,
+        since: datetime,
+        keywords: list[str],
+    ) -> dict[str, dict[str, int]]:
+        """
+        기간 내 키워드별 검색 수와 클릭 수를 집계합니다.
+
+        검색 이벤트와 클릭 이벤트가 같은 테이블에 저장되므로,
+        clicked_movie_id 여부로 두 값을 분리합니다.
+        """
+        if not keywords:
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(keywords))
+        sql = (
+            "SELECT keyword, "
+            "SUM(CASE WHEN clicked_movie_id IS NULL THEN 1 ELSE 0 END) AS search_count, "
+            "SUM(CASE WHEN clicked_movie_id IS NOT NULL THEN 1 ELSE 0 END) AS click_count "
+            "FROM search_history "
+            f"WHERE searched_at >= %s AND keyword IN ({placeholders}) "
+            "GROUP BY keyword"
+        )
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, (since, *keywords))
+            rows = await cur.fetchall()
+
+        return {
+            row["keyword"]: {
+                "search_count": int(row.get("search_count") or 0),
+                "click_count": int(row.get("click_count") or 0),
+            }
+            for row in rows
+        }
