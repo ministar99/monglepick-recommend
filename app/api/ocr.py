@@ -35,7 +35,7 @@ _IS_PRODUCTION: bool = os.getenv("ENV", "").lower() in {"production", "prod"}
 router = APIRouter(prefix="/ocr", tags=["OCR 영수증 분석"])
 
 
-@router.post("/analyze", response_model=OcrAnalyzeResponse, response_model_by_alias=True, summary="영수증 OCR 분석")
+@router.post("/analyze", response_model=OcrAnalyzeResponse, summary="영수증 OCR 분석")
 async def analyze_receipt(request: OcrAnalyzeRequest) -> OcrAnalyzeResponse:
     """
     영수증 이미지 URL을 받아 OCR 분석 후 구조화된 데이터를 반환한다.

@@ -16,7 +16,6 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic.alias_generators import to_camel
 
 
 # =========================================
@@ -580,11 +579,12 @@ class OcrAnalyzeRequest(BaseModel):
 
 
 class OcrAnalyzeResponse(BaseModel):
-    """영수증 OCR 분석 결과 — 6개 필드 개별 성공 여부 포함"""
-    model_config = ConfigDict(
-        populate_by_name=True,
-        alias_generator=to_camel,
-    )
+    """영수증 OCR 분석 결과 — 6개 필드 개별 성공 여부 포함.
+
+    응답 JSON 키는 snake_case 그대로 사용한다. Backend `OcrAnalysisClient.OcrResponse`
+    가 `@JsonNaming(SnakeCaseStrategy)` 로 record 필드(camelCase) ↔ JSON(snake_case) 매핑을
+    수행하므로 여기서 alias 를 camel 로 바꾸면 Backend 역직렬화가 모두 null 로 깨진다.
+    """
 
     success: bool = Field(description="OCR 텍스트 추출 성공 여부 (개별 필드와 독립)")
     # 전체 상태: SUCCESS(영화명+관람일 모두) / PARTIAL_SUCCESS(1개 이상) / FAILED(없음)
