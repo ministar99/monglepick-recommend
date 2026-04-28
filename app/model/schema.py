@@ -134,6 +134,18 @@ class TrendingResponse(BaseModel):
     keywords: list[TrendingKeywordItem] = Field(description="인기 검색어 목록")
 
 
+class AdminPopularKeywordItem(BaseModel):
+    """관리자 검색 분석 탭용 인기 검색어 항목"""
+    keyword: str = Field(description="검색 키워드")
+    search_count: int = Field(description="trending_keywords 기준 누적 검색 수")
+    conversion_rate: float = Field(description="검색 후 결과 클릭 전환율 (0.0~1.0)")
+
+
+class AdminPopularKeywordsResponse(BaseModel):
+    """관리자 검색 분석 탭용 인기 검색어 목록 응답"""
+    keywords: list[AdminPopularKeywordItem] = Field(description="인기 검색어 목록")
+
+
 class SearchGenreOption(BaseModel):
     """검색 페이지 장르 선택 옵션"""
     label: str = Field(description="사용자에게 노출할 장르 라벨")

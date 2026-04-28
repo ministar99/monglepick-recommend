@@ -80,3 +80,30 @@ class TrendingRepository:
             rows = await cur.fetchall()
 
         return [TrendingKeywordDTO(**row) for row in rows]
+
+    async def get_recent_top_keywords(
+        self,
+        since: datetime,
+        limit: int = 20,
+    ) -> list[TrendingKeywordDTO]:
+        """
+        기준 시각 이후에 검색된 인기 키워드를 조회합니다.
+
+        Args:
+            since: 포함 시작 시각 (UTC)
+            limit: 반환할 최대 건수
+
+        Returns:
+            최근 활성 키워드 DTO 목록
+        """
+        sql = (
+            "SELECT * FROM trending_keywords "
+            "WHERE last_searched_at >= %s "
+            "ORDER BY search_count DESC, last_searched_at DESC "
+            "LIMIT %s"
+        )
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, (since, limit))
+            rows = await cur.fetchall()
+
+        return [TrendingKeywordDTO(**row) for row in rows]
