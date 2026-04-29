@@ -112,7 +112,7 @@ class RelatedMovieService:
     """컬렉션 우선 + Qdrant 기반 연관 영화 서비스입니다."""
 
     _CACHE_PREFIX = "related:movies"
-    _CACHE_VERSION = "v3"
+    _CACHE_VERSION = "v4"
 
     def __init__(
         self,
@@ -670,15 +670,15 @@ class RelatedMovieService:
             self._merge_identifier_list(
                 candidate_map,
                 payload.get("similar_movie_ids"),
-                score=24.0,
-                reason="Qdrant 유사 목록",
+                score=100.0,
+                reason="비슷한 분위기의 작품",
                 source="qdrant_similar_ids",
             )
             self._merge_identifier_list(
                 candidate_map,
                 payload.get("recommendation_ids"),
-                score=14.0,
-                reason="Qdrant 추천 목록",
+                score=100.0,
+                reason="함께 추천되는 작품",
                 source="qdrant_recommendation_ids",
             )
 
@@ -700,8 +700,8 @@ class RelatedMovieService:
                 self._merge_candidate(
                     candidate_map,
                     external_id=candidate_id,
-                    score=similarity * 180.0 + rank_bonus * 0.5,
-                    reason="줄거리 벡터 유사",
+                    score=similarity * 10.0 + rank_bonus * 0.5,
+                    reason="비슷한 줄거리",
                     source="qdrant_plot_vector",
                     qdrant_vector_similarity=similarity,
                     qdrant_vector_rank=index,
@@ -849,7 +849,7 @@ class RelatedMovieService:
                     candidate_map,
                     external_id=candidate_id,
                     score=9.0,
-                    reason="Neo4j 유사 관계",
+                    reason="비슷한 작품",
                     source="neo4j_similar_to",
                 )
             if "RECOMMENDED" in relation_types:
@@ -857,7 +857,7 @@ class RelatedMovieService:
                     candidate_map,
                     external_id=candidate_id,
                     score=5.0,
-                    reason="Neo4j 추천 관계",
+                    reason="함께 언급됨",
                     source="neo4j_recommended",
                 )
 
@@ -1121,19 +1121,23 @@ class RelatedMovieService:
         def reason_priority(reason: str) -> tuple[int, str]:
             if reason.startswith("같은 컬렉션"):
                 return (0, reason)
-            if reason.startswith("줄거리 벡터 유사"):
+            if reason.startswith("비슷한 줄거리"):
                 return (1, reason)
-            if reason.startswith("Qdrant 유사 목록"):
+            if reason.startswith("비슷한 분위기의 작품"):
                 return (2, reason)
-            if reason.startswith("Qdrant 추천 목록"):
+            if reason.startswith("함께 추천되는 작품"):
                 return (3, reason)
-            if "장르" in reason:
+            if reason.startswith("비슷한 작품"):
                 return (4, reason)
-            if reason.startswith("공통 출연"):
+            if reason.startswith("함께 언급됨"):
                 return (5, reason)
-            if reason.startswith("같은 감독"):
+            if "장르" in reason:
                 return (6, reason)
-            return (7, reason)
+            if reason.startswith("공통 출연"):
+                return (7, reason)
+            if reason.startswith("같은 감독"):
+                return (8, reason)
+            return (9, reason)
 
         ordered = sorted(
             [reason for reason in reasons if reason],
