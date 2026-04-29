@@ -119,3 +119,15 @@ async def get_redis_client() -> aioredis.Redis:
         RuntimeError: Redis가 초기화되지 않은 경우
     """
     return await get_redis()
+
+
+async def get_redis_client_optional() -> aioredis.Redis | None:
+    """
+    Redis 비동기 클라이언트를 선택적으로 주입합니다.
+
+    Redis가 초기화되지 않았으면 None을 반환해 호출부가 캐시 없이 동작할 수 있게 합니다.
+    """
+    try:
+        return await get_redis()
+    except RuntimeError:
+        return None
