@@ -14,13 +14,19 @@ OCR 영수증 분석 API
     설정할 것. 로컬/스테이징에서는 그대로 노출되어 파서 디버깅을 지원한다.
 """
 
+import difflib
 import logging
 import os
+import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_db
 from app.model.schema import OcrAnalyzeRequest, OcrAnalyzeResponse
 from app.service.ocr_service import extract_text_from_url
 from app.service.receipt_parser_service import parse_receipt, _normalize_ocr_text, _split_lines
@@ -35,8 +41,85 @@ _IS_PRODUCTION: bool = os.getenv("ENV", "").lower() in {"production", "prod"}
 router = APIRouter(prefix="/ocr", tags=["OCR 영수증 분석"])
 
 
+# ── 이벤트 컨텍스트 조회 ──────────────────────────────
+
+async def _fetch_event(db: AsyncSession, event_id: str) -> Optional[dict]:
+    """ocr_event 테이블에서 이벤트 메타 조회."""
+    try:
+        result = await db.execute(
+            text("SELECT title, movie_id, start_date, end_date FROM ocr_event WHERE event_id = :eid"),
+            {"eid": int(event_id)},
+        )
+        row = result.fetchone()
+        if row:
+            return {"title": row[0], "movie_id": row[1], "start_date": row[2], "end_date": row[3]}
+    except Exception as e:
+        logger.warning("ocr_event 조회 실패 event_id=%s: %s", event_id, e)
+    return None
+
+
+def _movie_similarity(a: str, b: str) -> float:
+    """두 영화 제목의 유사도 (0.0~1.0). 공백·특수문자 제거 후 비교."""
+    def norm(s: str) -> str:
+        return re.sub(r"[\s\-:·：··]", "", s).lower()
+
+    na, nb = norm(a), norm(b)
+    if not na or not nb:
+        return 0.0
+    if na in nb or nb in na:
+        return 0.85
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
+def _adjust_confidence(
+    confidence: float,
+    extracted_movie: Optional[str],
+    extracted_date: Optional[str],
+    event_title: Optional[str],
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
+) -> float:
+    """이벤트 제목·기간과 비교해 신뢰도를 보정한다."""
+    adj = 0.0
+
+    # 영화 제목 유사도 검증
+    if event_title:
+        if extracted_movie:
+            sim = _movie_similarity(extracted_movie, event_title)
+            logger.info("영화명 유사도 — extracted=%s event=%s sim=%.2f", extracted_movie, event_title, sim)
+            if sim >= 0.6:
+                adj += 0.10      # 제목 일치 → 소폭 보너스
+            elif sim >= 0.35:
+                adj -= 0.20      # 부분 불일치
+            else:
+                adj -= 0.50      # 다른 영화 → 큰 패널티
+        else:
+            adj -= 0.30          # 제목 추출 자체 실패
+
+    # 관람일 기간 검증
+    if extracted_date and start_date and end_date:
+        try:
+            watch = datetime.strptime(extracted_date, "%Y-%m-%d").date()
+            if start_date.date() <= watch <= end_date.date():
+                adj += 0.10      # 이벤트 기간 내
+            else:
+                logger.info("관람일 범위 초과 — date=%s period=%s~%s", watch, start_date.date(), end_date.date())
+                adj -= 0.30      # 이벤트 기간 외
+        except (ValueError, AttributeError):
+            pass
+
+    result = round(max(0.0, min(1.0, confidence + adj)), 2)
+    logger.info("신뢰도 보정 — base=%.2f adj=%.2f final=%.2f", confidence, adj, result)
+    return result
+
+
+# ── 분석 엔드포인트 ───────────────────────────────────
+
 @router.post("/analyze", response_model=OcrAnalyzeResponse, summary="영수증 OCR 분석")
-async def analyze_receipt(request: OcrAnalyzeRequest) -> OcrAnalyzeResponse:
+async def analyze_receipt(
+    request: OcrAnalyzeRequest,
+    db: AsyncSession = Depends(get_db),
+) -> OcrAnalyzeResponse:
     """
     영수증 이미지 URL을 받아 OCR 분석 후 구조화된 데이터를 반환한다.
 
@@ -45,6 +128,14 @@ async def analyze_receipt(request: OcrAnalyzeRequest) -> OcrAnalyzeResponse:
     - 개별 필드(movie_name_ok / watch_date_ok / headcount_ok)로 부분 성공을 명시한다.
     """
     logger.info("OCR 분석 요청 — event_id=%s url=%s", request.event_id, request.image_url)
+
+    # 이벤트 메타 조회 (제목·기간 검증용)
+    event = None
+    if request.event_id:
+        event = await _fetch_event(db, request.event_id)
+        if event:
+            logger.info("이벤트 컨텍스트 — title=%s period=%s~%s",
+                        event["title"], event["start_date"], event["end_date"])
 
     best_text, all_texts = await extract_text_from_url(request.image_url)
 
@@ -58,12 +149,24 @@ async def analyze_receipt(request: OcrAnalyzeRequest) -> OcrAnalyzeResponse:
 
     result = parse_receipt(best_text, fallback_texts=all_texts)
 
+    # 이벤트 제목·기간 기준으로 신뢰도 보정
+    confidence = result["confidence"]
+    if event:
+        confidence = _adjust_confidence(
+            confidence,
+            extracted_movie=result["movie_name"],
+            extracted_date=result["watch_date"],
+            event_title=event["title"],
+            start_date=event["start_date"],
+            end_date=event["end_date"],
+        )
+
     logger.info(
         "OCR 분석 완료 — status=%s movie_ok=%s date_ok=%s headcount_ok=%s "
         "seat_ok=%s time_ok=%s theater_ok=%s venue_ok=%s confidence=%.2f",
         result["status"], result["movie_name_ok"], result["watch_date_ok"], result["headcount_ok"],
         result["seat_ok"], result["screening_time_ok"], result["theater_ok"],
-        result["venue_ok"], result["confidence"],
+        result["venue_ok"], confidence,
     )
 
     return OcrAnalyzeResponse(
@@ -78,7 +181,7 @@ async def analyze_receipt(request: OcrAnalyzeRequest) -> OcrAnalyzeResponse:
         venue=result["venue"],
         watched_at=result["watched_at"],
         parsed_text=best_text,
-        confidence=result["confidence"],
+        confidence=confidence,
         movie_name_ok=result["movie_name_ok"],
         watch_date_ok=result["watch_date_ok"],
         headcount_ok=result["headcount_ok"],
