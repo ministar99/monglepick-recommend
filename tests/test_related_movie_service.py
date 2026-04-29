@@ -308,7 +308,7 @@ def test_build_related_movie_items_prefers_qdrant_vector_similarity_over_directo
                 score=130.0,
                 qdrant_vector_similarity=0.92,
                 qdrant_vector_rank=0,
-                reasons=["줄거리 벡터 유사", "같은 장르: 드라마"],
+                reasons=["비슷한 줄거리", "같은 장르: 드라마"],
                 sources=["qdrant_plot_vector"],
             ),
             "3": RelatedCandidate(
@@ -324,7 +324,31 @@ def test_build_related_movie_items_prefers_qdrant_vector_similarity_over_directo
     )
 
     assert [item.movie_id for item in related_items] == ["2", "3"]
-    assert related_items[0].relation_reasons[0] == "줄거리 벡터 유사"
+    assert related_items[0].relation_reasons[0] == "비슷한 줄거리"
+
+
+def test_prioritize_relation_reasons_uses_user_friendly_labels():
+    service = RelatedMovieService(conn=None)
+
+    ordered_reasons = service._prioritize_relation_reasons([
+        "같은 감독: 크리스토퍼 놀란",
+        "함께 언급됨",
+        "함께 추천되는 작품",
+        "비슷한 분위기의 작품",
+        "비슷한 작품",
+        "비슷한 줄거리",
+        "같은 컬렉션: 다크 나이트 트릴로지",
+    ])
+
+    assert ordered_reasons == [
+        "같은 컬렉션: 다크 나이트 트릴로지",
+        "비슷한 줄거리",
+        "비슷한 분위기의 작품",
+        "함께 추천되는 작품",
+        "비슷한 작품",
+        "함께 언급됨",
+        "같은 감독: 크리스토퍼 놀란",
+    ]
 
 
 def test_build_related_movie_items_excludes_same_collection_by_name_without_collection_lookup():
@@ -355,14 +379,14 @@ def test_build_related_movie_items_excludes_same_collection_by_name_without_coll
                 score=140.0,
                 qdrant_vector_similarity=0.95,
                 qdrant_vector_rank=0,
-                reasons=["줄거리 벡터 유사"],
+                reasons=["비슷한 줄거리"],
                 sources=["qdrant_plot_vector"],
             ),
             "3": RelatedCandidate(
                 score=120.0,
                 qdrant_vector_similarity=0.82,
                 qdrant_vector_rank=1,
-                reasons=["줄거리 벡터 유사"],
+                reasons=["비슷한 줄거리"],
                 sources=["qdrant_plot_vector"],
             ),
         },
@@ -413,14 +437,14 @@ def test_build_related_movie_items_excludes_movies_without_poster():
                 score=130.0,
                 qdrant_vector_similarity=0.93,
                 qdrant_vector_rank=0,
-                reasons=["줄거리 벡터 유사"],
+                reasons=["비슷한 줄거리"],
                 sources=["qdrant_plot_vector"],
             ),
             "4": RelatedCandidate(
                 score=120.0,
                 qdrant_vector_similarity=0.82,
                 qdrant_vector_rank=1,
-                reasons=["줄거리 벡터 유사"],
+                reasons=["비슷한 줄거리"],
                 sources=["qdrant_plot_vector"],
             ),
         },
@@ -463,14 +487,14 @@ def test_build_related_movie_items_excludes_collection_movies_from_general_relat
                 score=160.0,
                 qdrant_vector_similarity=0.98,
                 qdrant_vector_rank=0,
-                reasons=["줄거리 벡터 유사"],
+                reasons=["비슷한 줄거리"],
                 sources=["qdrant_plot_vector"],
             ),
             "3": RelatedCandidate(
                 score=120.0,
                 qdrant_vector_similarity=0.85,
                 qdrant_vector_rank=1,
-                reasons=["줄거리 벡터 유사"],
+                reasons=["비슷한 줄거리"],
                 sources=["qdrant_plot_vector"],
             ),
         },
@@ -656,7 +680,7 @@ async def test_get_related_movies_caches_final_response_and_skips_neo4j():
                 score=140.0,
                 qdrant_vector_similarity=0.91,
                 qdrant_vector_rank=0,
-                reasons=["줄거리 벡터 유사"],
+                reasons=["비슷한 줄거리"],
                 sources=["qdrant_plot_vector"],
             )
         }
@@ -677,7 +701,7 @@ async def test_get_related_movies_caches_final_response_and_skips_neo4j():
     response = await service.get_related_movies("1", limit=25)
 
     assert [item.movie_id for item in response.movies] == ["3"]
-    assert response.movies[0].relation_reasons[0] == "줄거리 벡터 유사"
+    assert response.movies[0].relation_reasons[0] == "비슷한 줄거리"
     assert redis.setex_calls
     assert redis.setex_calls[0][0] == RelatedMovieService._cache_key("1", 25)
 

@@ -9,6 +9,7 @@ v1(SQLAlchemy ORM)의 AutocompleteService를 Raw SQL 리포지토리 기반으�
 
 import json
 import logging
+import re
 
 import aiomysql
 import redis.asyncio as aioredis
@@ -26,6 +27,7 @@ class AutocompleteService:
 
     # Redis 캐시 키 접두어
     CACHE_KEY_PREFIX = "autocomplete:v2:"
+    _KOREAN_TITLE_PATTERN = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
 
     def __init__(self, conn: aiomysql.Connection, redis_client: aioredis.Redis):
         """
@@ -63,8 +65,8 @@ class AutocompleteService:
                 did_you_mean = payload.get("did_you_mean") if isinstance(payload, dict) else None
                 logger.debug(f"자동완성 캐시 히트: prefix='{prefix_stripped}', 건수={len(suggestions)}")
                 return AutocompleteResponse(
-                    suggestions=suggestions[:limit],
-                    did_you_mean=did_you_mean,
+                    suggestions=self._filter_korean_title_suggestions(suggestions, limit=limit),
+                    did_you_mean=self._filter_korean_title(did_you_mean),
                 )
         except Exception as e:
             logger.warning(f"Redis 자동완성 캐시 조회 실패: {e}")
@@ -73,12 +75,15 @@ class AutocompleteService:
         es_result = await self._search_es.autocomplete(prefix_stripped, limit)
         if es_result is not None:
             response = AutocompleteResponse(
-                suggestions=es_result.suggestions[:limit],
-                did_you_mean=es_result.did_you_mean,
+                suggestions=self._filter_korean_title_suggestions(es_result.suggestions, limit=limit),
+                did_you_mean=self._filter_korean_title(es_result.did_you_mean),
             )
         else:
             titles = await self._movie_repo.autocomplete_titles(prefix_stripped, limit)
-            response = AutocompleteResponse(suggestions=titles, did_you_mean=None)
+            response = AutocompleteResponse(
+                suggestions=self._filter_korean_title_suggestions(titles, limit=limit),
+                did_you_mean=None,
+            )
 
         # 3단계: Redis 캐싱
         try:
@@ -97,3 +102,27 @@ class AutocompleteService:
             logger.warning(f"Redis 자동완성 캐싱 실패: {e}")
 
         return response
+
+    def _filter_korean_title_suggestions(self, suggestions: list[str], *, limit: int) -> list[str]:
+        filtered: list[str] = []
+        for suggestion in suggestions:
+            filtered_title = self._filter_korean_title(suggestion)
+            if filtered_title is None:
+                continue
+            filtered.append(filtered_title)
+            if len(filtered) >= limit:
+                break
+        return filtered
+
+    def _filter_korean_title(self, title: str | None) -> str | None:
+        if not isinstance(title, str):
+            return None
+
+        normalized_title = title.strip()
+        if not normalized_title:
+            return None
+
+        if self._KOREAN_TITLE_PATTERN.search(normalized_title) is None:
+            return None
+
+        return normalized_title
