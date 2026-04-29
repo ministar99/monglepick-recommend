@@ -1,8 +1,7 @@
 """
-영화관 영수증 OCR 서비스 (Tesseract)
+영화관 영수증 OCR 서비스 (Upstage Document AI)
 
-이미지 전처리 다중 변형(gray / 자동대비 이진화 / 고대비 샤픈) →
-Tesseract OCR → 점수 가장 높은 텍스트 선택
+이미지 URL 다운로드 → Upstage OCR API 호출 → 텍스트 반환
 
 보안 정책:
   - SSRF 방어: image_url 은 http/https 만 허용하고, 호스트 해석 결과가 사설/
@@ -21,8 +20,6 @@ from typing import Optional, List, Tuple
 from urllib.parse import urlparse
 
 import httpx
-import pytesseract
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -37,119 +34,33 @@ _ALLOWED_HOSTS: frozenset[str] = frozenset(
     h.strip().lower() for h in os.getenv("OCR_ALLOWED_HOSTS", "").split(",") if h.strip()
 )
 
-# Tesseract — kor+eng: 한글+영문 혼용 영수증
-# psm 6: 단일 균일 블록, psm 4: 단일 컬럼 (열지 모양 영수증에 유리)
-_TESSERACT_LANG = "kor+eng"
-_CFG_PSM6 = "--oem 3 --psm 6"
-_CFG_PSM4 = "--oem 3 --psm 4"
+# ──────────────────────────────────────────────
+# Upstage OCR 설정
+# ──────────────────────────────────────────────
 
-# 짧은 변 기준 최소 해상도 (px) — 이 미만이면 업스케일
-_MIN_DIM = 800
+_UPSTAGE_API_KEY: str = os.getenv("UPSTAGE_API_KEY", "")
+_UPSTAGE_OCR_URL: str = "https://api.upstage.ai/v1/document-ai/ocr"
+_UPSTAGE_TIMEOUT: float = float(os.getenv("UPSTAGE_OCR_TIMEOUT", 30.0))
 
 
 # ──────────────────────────────────────────────
-# 공통 전처리 유틸
-# ──────────────────────────────────────────────
-
-def _resize_to_target(img: Image.Image, min_dim: int = _MIN_DIM) -> Image.Image:
-    w, h = img.size
-    short = min(w, h)
-    if short < min_dim:
-        scale = min_dim / short
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-    return img
-
-
-def _crop_receipt_center(img: Image.Image, margin: float = 0.03) -> Image.Image:
-    w, h = img.size
-    return img.crop((
-        int(w * margin), int(h * margin),
-        int(w * (1 - margin)), int(h * (1 - margin)),
-    ))
-
-
-def _base_gray(img: Image.Image) -> Image.Image:
-    """RGB → 노이즈 제거 회색조."""
-    gray = img.convert("L")
-    return gray.filter(ImageFilter.MedianFilter(size=3))
-
-
-# ──────────────────────────────────────────────
-# 전처리 변형 3종
-# ──────────────────────────────────────────────
-
-def _variant_gray_enhance(gray: Image.Image) -> Image.Image:
-    """대비 2배 + 밝기 미세 조정 + 샤픈 — 일반 촬영 영수증."""
-    out = ImageEnhance.Contrast(gray).enhance(2.0)
-    out = ImageEnhance.Brightness(out).enhance(1.1)
-    return out.filter(ImageFilter.SHARPEN)
-
-
-def _variant_autocontrast_binary(gray: Image.Image) -> Image.Image:
-    """자동 대비 → 적응형 이진화 — 형광등 그림자·불균일 조명 대응."""
-    out = ImageOps.autocontrast(gray, cutoff=2)
-    pixel_sum = sum(out.getdata())
-    mean_val = pixel_sum / (out.width * out.height)
-    # 평균 밝기보다 약간 밝은 픽셀을 흰색으로: 어두운 이미지는 threshold 낮게
-    threshold = int(min(200, max(110, mean_val * 1.05)))
-    return out.point(lambda x: 255 if x > threshold else 0, "L")
-
-
-def _variant_high_contrast(gray: Image.Image) -> Image.Image:
-    """대비 3배 + 이중 샤픈 — 흐릿하거나 연한 열지 영수증."""
-    out = ImageEnhance.Contrast(gray).enhance(3.0)
-    out = out.filter(ImageFilter.SHARPEN)
-    return out.filter(ImageFilter.SHARPEN)
-
-
-def _preprocess_variants(image_bytes: bytes) -> List[Tuple[str, Image.Image, str]]:
-    """
-    (variant_name, 전처리_이미지, tesseract_config) 목록 반환.
-    각 variant × PSM 조합으로 최대 5회 시도.
-    """
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = _crop_receipt_center(img)
-    img = _resize_to_target(img)
-    gray = _base_gray(img)
-
-    return [
-        ("gray_psm6",          _variant_gray_enhance(gray),        _CFG_PSM6),
-        ("gray_psm4",          _variant_gray_enhance(gray),        _CFG_PSM4),
-        ("autocontrast_psm6",  _variant_autocontrast_binary(gray), _CFG_PSM6),
-        ("autocontrast_psm4",  _variant_autocontrast_binary(gray), _CFG_PSM4),
-        ("high_contrast_psm6", _variant_high_contrast(gray),       _CFG_PSM6),
-    ]
-
-
-# ──────────────────────────────────────────────
-# OCR 품질 점수
+# OCR 품질 점수 (로깅용)
 # ──────────────────────────────────────────────
 
 _SCORE_PATTERNS: List[Tuple[str, float]] = [
-    # 영화관 브랜드
     (r"(?:CGV|메가박스|MEGABOX|롯데\s*시네마|LOTTE\s*CINEMA|B[O0]X\s*KIOSK)", 30.0),
-    # 관람등급
     (r"(?:전체|12세|15세|18세|청소년).{0,4}관람",                               25.0),
-    # 인원/좌석 레이블
     (r"(?:일반|성인|청소년|우대|군인)\s*\d+\s*[명매]",                           20.0),
-    # 날짜
     (r"\d{4}[./-]\d{1,2}[./-]\d{1,2}",                                        20.0),
     (r"\d{2}[./-]\d{1,2}[./-]\d{1,2}",                                        15.0),
-    # 시간
     (r"\d{1,2}:\d{2}",                                                         10.0),
-    # 좌석 (열/번 형식)
     (r"[A-Z가-힣]\s*열\s*\d+\s*번?",                                           20.0),
-    # 좌석 코드 (A10, G8 등)
     (r"\b[A-Z]\d{1,3}\b",                                                      12.0),
-    # 상영관
     (r"\d+\s*관(?!람|객)",                                                      12.0),
-    # 영화/좌석/상영 관련 키워드 레이블
     (r"(?:영화명|작품명|상영\s*제목)",                                            18.0),
     (r"(?:좌석\s*번호?|SEAT\b)",                                                15.0),
     (r"(?:상영관|관람관|관람일|관람일시|상영일시)",                                 12.0),
-    # 일반 키워드
     (r"(?:영화|관람|상영|티켓|입장|좌석)",                                         8.0),
-    # 영화 제목 힌트
     (r"(?:어벤|아바타|오펜하이|파묘|범죄|Avengers|Avatar|Oppenheimer)",           35.0),
 ]
 
@@ -165,42 +76,28 @@ def _ocr_score(text: str) -> float:
 
 
 # ──────────────────────────────────────────────
-# 메인 OCR 실행
+# Upstage OCR 호출
 # ──────────────────────────────────────────────
 
-def _ocr_with_best_variant(image_bytes: bytes) -> Tuple[Optional[str], List[str]]:
-    variants = _preprocess_variants(image_bytes)
-    best_text: Optional[str] = None
-    best_score: float = -1.0
-    all_texts: List[str] = []
+async def _call_upstage_ocr(image_bytes: bytes, filename: str = "receipt.jpg") -> Optional[str]:
+    if not _UPSTAGE_API_KEY:
+        raise RuntimeError("UPSTAGE_API_KEY 환경변수가 설정되지 않았습니다.")
 
-    for name, img, cfg in variants:
-        try:
-            text = pytesseract.image_to_string(img, lang=_TESSERACT_LANG, config=cfg)
-            text = text.strip()
-        except Exception as e:
-            logger.warning("OCR 실패 variant=%s error=%s", name, e)
-            continue
+    headers = {"Authorization": f"Bearer {_UPSTAGE_API_KEY}"}
+    files = {"document": (filename, io.BytesIO(image_bytes), "image/jpeg")}
 
-        score = _ocr_score(text)
-        logger.info(
-            "── variant=%-22s score=%6.1f  chars=%4d  preview=%s",
-            name, score, len(text), text[:80].replace("\n", " | "),
-        )
+    async with httpx.AsyncClient(timeout=_UPSTAGE_TIMEOUT) as client:
+        response = await client.post(_UPSTAGE_OCR_URL, headers=headers, files=files)
+        response.raise_for_status()
 
-        if text:
-            all_texts.append(text)
+    data = response.json()
 
-        if score > best_score:
-            best_score = score
-            best_text = text
-
-    logger.info("────────────────────────────────────────────")
-    if not best_text:
-        return None, all_texts
-
-    logger.info("최선 variant 선택: score=%.1f  chars=%d", best_score, len(best_text))
-    return best_text, all_texts
+    # 최상위 text 필드가 전 페이지 합산 텍스트. 없으면 pages[].text 폴백.
+    text = data.get("text") or ""
+    if not text:
+        pages = data.get("pages") or []
+        text = "\n".join(p.get("text", "") for p in pages if p.get("text"))
+    return text or None
 
 
 # ──────────────────────────────────────────────
@@ -303,12 +200,17 @@ async def extract_text_from_url(image_url: str) -> Tuple[Optional[str], List[str
         return None, []
 
     try:
-        best_text, all_texts = _ocr_with_best_variant(image_bytes)
-        if not best_text:
-            logger.warning("OCR 추출 결과 없음")
+        parsed = urlparse(image_url)
+        filename = os.path.basename(parsed.path) or "receipt.jpg"
+
+        text = await _call_upstage_ocr(image_bytes, filename)
+        if not text:
+            logger.warning("Upstage OCR 추출 결과 없음")
             return None, []
-        logger.info("OCR 추출 완료 — 글자 수: %d", len(best_text))
-        return best_text, all_texts
+
+        score = _ocr_score(text)
+        logger.info("Upstage OCR 완료 — score=%.1f  chars=%d", score, len(text))
+        return text, [text]
     except Exception as e:
         logger.error("OCR 처리 오류: %s", e)
         return None, []

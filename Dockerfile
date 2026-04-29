@@ -30,12 +30,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# curl(헬스체크) + tzdata(Asia/Seoul) + tesseract-ocr(영수증 OCR)
+# curl(헬스체크) + tzdata(Asia/Seoul)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         tzdata \
-        tesseract-ocr \
-        tesseract-ocr-kor \
     && ln -snf /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
     && echo "Asia/Seoul" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
