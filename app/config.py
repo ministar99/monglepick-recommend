@@ -111,7 +111,23 @@ class Settings(BaseSettings):
     # 검색용 Elasticsearch 접속 URL
     ELASTICSEARCH_URL: str | None = None
     # 검색용 Elasticsearch 인덱스명
-    ELASTICSEARCH_INDEX: str = "movies_bm25"
+    ELASTICSEARCH_INDEX: str = Field(...)
+    # 연관 영화 조회용 Qdrant 로컬/SSH 터널 URL
+    QDRANT_URL: str = Field(...)
+    # 연관 영화 조회용 Qdrant 컬렉션명
+    QDRANT_COLLECTION: str = "movies"
+    # 연관 영화 조회용 Neo4j HTTP 엔드포인트 (읽기 전용 Cypher 실행)
+    NEO4J_HTTP_URL: str = Field(...)
+    # Neo4j 기본 계정 — 로컬/SSH 터널 환경에서 env로 덮어쓸 수 있다.
+    NEO4J_USER: str = Field(...)
+    # Neo4j 기본 비밀번호 — 로컬 가이드 값을 기본으로 두되 env가 우선한다.
+    NEO4J_PASSWORD: str = Field(...)
+    # 외부 DB(Qdrant/Neo4j) 조회 타임아웃 (초)
+    RELATED_MOVIE_HTTP_TIMEOUT_SEC: float = 4.0
+    # 영화 상세 연관 영화 기본/최대 노출 개수
+    RELATED_MOVIES_LIMIT: int = 25
+    # 영화 상세 연관 영화 최종 응답 Redis 캐시 TTL (초)
+    RELATED_MOVIES_CACHE_TTL: int = 300
     # 인기 검색어 집계 기간 (시간)
     TRENDING_WINDOW_HOURS: int = 24
     # 인기 검색어 표시 개수
