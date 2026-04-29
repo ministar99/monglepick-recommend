@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config import get_settings
 
@@ -81,6 +81,12 @@ class ESSearchMovieItem:
     poster_path: str | None
     trailer_url: str | None
     overview: str | None
+    director: str | None = None
+    cast: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+    collection_name: str | None = None
+    matched_queries: list[str] = field(default_factory=list)
+    score: float | None = None
 
 
 @dataclass(slots=True)
@@ -322,13 +328,129 @@ class ElasticsearchSearchClient:
         hits = response.get("hits", {}).get("hits", [])
         total_raw = response.get("hits", {}).get("total", 0)
         total = total_raw.get("value", 0) if isinstance(total_raw, dict) else int(total_raw or 0)
-        movies = [self._to_movie_item(hit.get("_source", {})) for hit in hits]
+        movies = [self._to_movie_item(hit) for hit in hits]
         return ESSearchMoviesResult(
             movies=movies,
             total=total,
             did_you_mean=did_you_mean,
             related_queries=related_queries,
         )
+
+    async def search_related_movies(
+        self,
+        *,
+        movie_id: str,
+        title: str,
+        title_en: str | None,
+        overview: str | None,
+        director: str | None,
+        cast_members: list[str] | None,
+        genres: list[str] | None,
+        collection_name: str | None,
+        limit: int | None = None,
+    ) -> list[ESSearchMovieItem] | None:
+        """영화 상세용 연관 영화 후보를 Elasticsearch 단일 쿼리로 조회합니다."""
+        if not self.is_available():
+            return None
+
+        normalized_limit = limit or self._settings.RELATED_MOVIES_LIMIT
+        source_title = title.strip()
+        if not source_title:
+            return []
+
+        try:
+            client = self._get_client()
+            if not await client.indices.exists(index=self._settings.ELASTICSEARCH_INDEX):
+                logger.warning("search_es_index_missing", extra={"index": self._settings.ELASTICSEARCH_INDEX})
+                return None
+
+            response = await client.search(
+                index=self._settings.ELASTICSEARCH_INDEX,
+                body=self._build_related_movie_search_body(
+                    movie_id=movie_id,
+                    title=source_title,
+                    title_en=title_en,
+                    overview=overview,
+                    director=director,
+                    cast_members=cast_members or [],
+                    genres=genres or [],
+                    collection_name=collection_name,
+                    limit=normalized_limit,
+                ),
+            )
+        except Exception as exc:
+            self._log_es_failure("search_es_related_movie_query_failed", exc)
+            return None
+
+        hits = response.get("hits", {}).get("hits", [])
+        related_movies: list[ESSearchMovieItem] = []
+        seen_ids: set[str] = set()
+
+        for hit in hits:
+            movie = self._to_movie_item(hit)
+            if not movie.movie_id or movie.movie_id == movie_id or movie.movie_id in seen_ids:
+                continue
+            seen_ids.add(movie.movie_id)
+            related_movies.append(movie)
+            if len(related_movies) >= normalized_limit:
+                break
+
+        return related_movies
+
+    async def search_collection_movies(
+        self,
+        *,
+        movie_id: str,
+        collection_name: str | None,
+        page_size: int = 100,
+    ) -> list[ESSearchMovieItem] | None:
+        """같은 collection_name 을 가진 영화를 모두 조회합니다."""
+        if not self.is_available():
+            return None
+
+        normalized_collection_name = collection_name.strip() if isinstance(collection_name, str) else ""
+        if not normalized_collection_name:
+            return []
+
+        try:
+            client = self._get_client()
+            if not await client.indices.exists(index=self._settings.ELASTICSEARCH_INDEX):
+                logger.warning("search_es_index_missing", extra={"index": self._settings.ELASTICSEARCH_INDEX})
+                return None
+
+            collection_movies: list[ESSearchMovieItem] = []
+            seen_ids: set[str] = set()
+            page = 0
+
+            while True:
+                response = await client.search(
+                    index=self._settings.ELASTICSEARCH_INDEX,
+                    body=self._build_collection_movie_search_body(
+                        movie_id=movie_id,
+                        collection_name=normalized_collection_name,
+                        page=page,
+                        page_size=page_size,
+                    ),
+                )
+                hits = response.get("hits", {}).get("hits", [])
+                if not hits:
+                    break
+
+                for hit in hits:
+                    movie = self._to_movie_item(hit)
+                    if not movie.movie_id or movie.movie_id == movie_id or movie.movie_id in seen_ids:
+                        continue
+                    seen_ids.add(movie.movie_id)
+                    collection_movies.append(movie)
+
+                if len(hits) < page_size:
+                    break
+                page += 1
+
+            return collection_movies
+        except Exception as exc:
+            self._log_es_failure("search_es_collection_movie_query_failed", exc)
+            return None
 
     def _build_search_body(
         self,
@@ -393,6 +515,230 @@ class ElasticsearchSearchClient:
         if keyword is not None:
             body["suggest"] = self._build_suggest_body(keyword, capabilities)
         return body
+
+    def _build_related_movie_search_body(
+        self,
+        *,
+        movie_id: str,
+        title: str,
+        title_en: str | None,
+        overview: str | None,
+        director: str | None,
+        cast_members: list[str],
+        genres: list[str],
+        collection_name: str | None,
+        limit: int,
+    ) -> dict:
+        like_texts = self._build_related_like_texts(
+            title=title,
+            title_en=title_en,
+            overview=overview,
+        )
+        should_clauses: list[dict] = []
+
+        if like_texts:
+            should_clauses.append(
+                {
+                    "more_like_this": {
+                        "fields": [
+                            "title",
+                            "title_en",
+                            "alternative_titles",
+                            "overview",
+                            "overview_en",
+                            "keywords",
+                        ],
+                        "like": like_texts,
+                        "min_term_freq": 1,
+                        "min_doc_freq": 1,
+                        "max_query_terms": 30,
+                        "boost": 5.2,
+                    }
+                }
+            )
+
+        if director and director.strip():
+            should_clauses.append(
+                {
+                    "match_phrase": {
+                        "director": {
+                            "query": director.strip(),
+                            "boost": 1.1,
+                        }
+                    }
+                }
+            )
+
+        normalized_genres = [genre for genre in dict.fromkeys(genres) if genre]
+        if normalized_genres:
+            should_clauses.extend(
+                {
+                    "constant_score": {
+                        "filter": {"term": {"genres": genre_name}},
+                        "boost": 2.8,
+                    }
+                }
+                for genre_name in normalized_genres[:4]
+            )
+
+        normalized_cast = [member for member in dict.fromkeys(cast_members) if member]
+        should_clauses.extend(
+            {
+                "match_phrase": {
+                    "cast": {
+                        "query": actor_name,
+                        "boost": 1.3,
+                    }
+                }
+            }
+            for actor_name in normalized_cast[:3]
+        )
+
+        if collection_name and collection_name.strip():
+            should_clauses.append(
+                {
+                    "match_phrase": {
+                        "collection_name": {
+                            "query": collection_name.strip(),
+                            "boost": 5.6,
+                        }
+                    }
+                }
+            )
+
+        if not should_clauses:
+            should_clauses.append(
+                {
+                    "multi_match": {
+                        "query": title,
+                        "fields": ["title^3", "title_en^2", "overview"],
+                        "type": "best_fields",
+                        "fuzziness": "AUTO",
+                    }
+                }
+            )
+
+        return {
+            "size": max(limit * 2, 30),
+            "_source": [
+                "id",
+                "movie_id",
+                "title",
+                "title_en",
+                "genres",
+                "release_year",
+                "rating",
+                "vote_count",
+                "poster_path",
+                "trailer_url",
+                "overview",
+                "director",
+                "cast",
+                "keywords",
+                "collection_name",
+            ],
+            "query": {
+                "bool": {
+                    "must_not": [
+                        {"term": {"id": movie_id}},
+                    ],
+                    "filter": self._build_common_filters(
+                        genre=None,
+                        year_from=None,
+                        year_to=None,
+                        rating_min=None,
+                        rating_max=None,
+                        popularity_min=None,
+                        popularity_max=None,
+                        vote_count_min=None,
+                    ),
+                    "should": should_clauses,
+                    "minimum_should_match": 1,
+                }
+            },
+            "sort": [
+                {"_score": {"order": "desc"}},
+                {"rating": {"order": "desc", "missing": "_last"}},
+                {"vote_count": {"order": "desc", "missing": "_last"}},
+                {"release_year": {"order": "desc", "missing": "_last"}},
+            ],
+        }
+
+    def _build_collection_movie_search_body(
+        self,
+        *,
+        movie_id: str,
+        collection_name: str,
+        page: int,
+        page_size: int,
+    ) -> dict:
+        return {
+            "from": page * page_size,
+            "size": page_size,
+            "_source": [
+                "id",
+                "movie_id",
+                "title",
+                "title_en",
+                "genres",
+                "release_year",
+                "rating",
+                "vote_count",
+                "poster_path",
+                "trailer_url",
+                "overview",
+                "director",
+                "cast",
+                "keywords",
+                "collection_name",
+            ],
+            "query": {
+                "bool": {
+                    "must": [
+                        {
+                            "match_phrase": {
+                                "collection_name": {
+                                    "query": collection_name,
+                                }
+                            }
+                        }
+                    ],
+                    "must_not": [
+                        {"term": {"id": movie_id}},
+                    ],
+                    "filter": self._build_common_filters(
+                        genre=None,
+                        year_from=None,
+                        year_to=None,
+                        rating_min=None,
+                        rating_max=None,
+                        popularity_min=None,
+                        popularity_max=None,
+                        vote_count_min=None,
+                    ),
+                }
+            },
+            "sort": [
+                {"release_year": {"order": "asc", "missing": "_last"}},
+                {"vote_count": {"order": "desc", "missing": "_last"}},
+                {"rating": {"order": "desc", "missing": "_last"}},
+                {"_score": {"order": "desc"}},
+            ],
+        }
+
+    def _build_related_like_texts(
+        self,
+        *,
+        title: str,
+        title_en: str | None,
+        overview: str | None,
+    ) -> list[str]:
+        like_texts = [title.strip()]
+        if title_en and title_en.strip():
+            like_texts.append(title_en.strip())
+        if overview and overview.strip():
+            like_texts.append(overview.strip()[:1200])
+        return like_texts
 
     def _get_client(self) -> AsyncElasticsearch:
         cls = type(self)
@@ -791,13 +1137,14 @@ class ElasticsearchSearchClient:
                 break
         return deduped
 
-    def _to_movie_item(self, source: dict) -> ESSearchMovieItem:
+    def _to_movie_item(self, hit: dict) -> ESSearchMovieItem:
+        source = hit.get("_source", {})
         genres = source.get("genres")
         if not isinstance(genres, list):
-            genres = []
+            genres = self._coerce_string_list(genres)
 
         return ESSearchMovieItem(
-            movie_id=str(source.get("id", "")),
+            movie_id=str(source.get("id") or source.get("movie_id") or ""),
             title=source.get("title", "") or "",
             title_en=source.get("title_en"),
             genres=[genre for genre in genres if isinstance(genre, str)],
@@ -807,4 +1154,21 @@ class ElasticsearchSearchClient:
             poster_path=source.get("poster_path"),
             trailer_url=source.get("trailer_url"),
             overview=source.get("overview"),
+            director=source.get("director"),
+            cast=self._coerce_string_list(source.get("cast")),
+            keywords=self._coerce_string_list(source.get("keywords")),
+            collection_name=source.get("collection_name"),
+            matched_queries=[
+                matched_query
+                for matched_query in (hit.get("matched_queries") or [])
+                if isinstance(matched_query, str) and matched_query.strip()
+            ],
+            score=hit.get("_score"),
         )
+
+    def _coerce_string_list(self, value: object) -> list[str]:
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, str) and item.strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []

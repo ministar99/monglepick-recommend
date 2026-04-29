@@ -81,6 +81,33 @@ class MovieDetailResponse(BaseModel):
     source: str | None = Field(default=None, description="데이터 출처")
 
 
+class RelatedMovieItem(BaseModel):
+    """
+    영화 상세의 연관 영화 개별 항목
+
+    컬렉션 우선 + Qdrant 줄거리 벡터 후보를 바탕으로 만든 결과이며,
+    프런트는 포스터/제목/개봉연도와 함께 추천 사유 태그를 표시한다.
+    """
+    movie_id: str = Field(description="영화 ID")
+    title: str = Field(description="한국어 제목")
+    title_en: str | None = Field(default=None, description="영어 원제")
+    genres: list[str] = Field(default_factory=list, description="장르 목록")
+    release_year: int | None = Field(default=None, description="개봉 연도")
+    rating: float | None = Field(default=None, description="평균 평점")
+    vote_count: int | None = Field(default=None, description="평점 참여 수")
+    poster_url: str | None = Field(default=None, description="포스터 이미지 전체 URL")
+    trailer_url: str | None = Field(default=None, description="예고편 URL")
+    overview: str | None = Field(default=None, description="줄거리 요약")
+    relation_score: float = Field(default=0.0, description="내부 랭킹 점수")
+    relation_reasons: list[str] = Field(default_factory=list, description="추천 사유 목록")
+    relation_sources: list[str] = Field(default_factory=list, description="후보를 만든 소스 목록")
+
+
+class RelatedMoviesResponse(BaseModel):
+    """영화 상세의 연관 영화 목록 응답"""
+    movies: list[RelatedMovieItem] = Field(default_factory=list, description="연관 영화 목록")
+
+
 class PaginationMeta(BaseModel):
     """페이지네이션 메타 정보"""
     page: int = Field(description="현재 페이지 번호 (1부터 시작)")

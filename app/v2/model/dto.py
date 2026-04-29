@@ -25,6 +25,7 @@ class MovieDTO(BaseModel):
     PK: movie_id VARCHAR(50) — TMDB/KOBIS/KMDb 등 다양한 소스의 ID가 공존합니다.
     """
     movie_id: str
+    tmdb_id: Optional[int] = None
     title: str
     title_en: Optional[str] = None
     poster_path: Optional[str] = None

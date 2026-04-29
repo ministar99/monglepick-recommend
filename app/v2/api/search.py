@@ -13,23 +13,33 @@ import aiomysql
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.v2.api.deps import get_conn, get_current_user, get_current_user_optional, get_redis_client
+from app.config import get_settings
+from app.v2.api.deps import (
+    get_conn,
+    get_current_user,
+    get_current_user_optional,
+    get_redis_client,
+    get_redis_client_optional,
+)
 from app.model.schema import (
     AdminPopularKeywordsResponse,
     AutocompleteResponse,
     MovieDetailResponse,
     MovieSearchResponse,
     RecentSearchResponse,
+    RelatedMoviesResponse,
     SearchClickLogRequest,
     SearchClickLogResponse,
     TrendingResponse,
 )
 from app.search_genre_catalog import normalize_search_genre_labels
+from app.v2.service.related_movie_service import RelatedMovieNotFoundError, RelatedMovieService
 from app.v2.service.autocomplete_service import AutocompleteService
 from app.v2.service.search_service import MovieDetailNotFoundError, SearchService
 from app.v2.service.trending_service import TrendingService
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 # ───────────────────────────────��─────────
 # 라우터 정의
@@ -158,6 +168,55 @@ async def get_movie_detail(
     try:
         return await service.get_movie_detail(movie_id)
     except MovieDetailNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/movies/{movie_id}/related/collection",
+    response_model=RelatedMoviesResponse,
+    summary="영화 컬렉션 작품 조회",
+    description="같은 컬렉션에 속한 작품만 빠르게 반환합니다.",
+)
+async def get_collection_related_movies(
+    movie_id: str,
+    conn: aiomysql.Connection = Depends(get_conn),
+):
+    """영화 상세의 컬렉션 작품 빠른 조회 엔드포인트 (인증 없이 접근 가능)."""
+    service = RelatedMovieService(conn)
+    try:
+        return await service.get_collection_related_movies(movie_id)
+    except RelatedMovieNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/movies/{movie_id}/related",
+    response_model=RelatedMoviesResponse,
+    summary="영화 연관 작품 조회",
+    description="컬렉션 작품을 우선 노출하고, Qdrant 기반 연관 영화를 반환하며 최종 결과는 Redis에 캐시합니다.",
+)
+async def get_related_movies(
+    movie_id: str,
+    limit: int = Query(
+        default=settings.RELATED_MOVIES_LIMIT,
+        description="최대 반환 개수",
+        ge=1,
+        le=settings.RELATED_MOVIES_LIMIT,
+    ),
+    conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
+):
+    """영화 상세의 연관 영화 목록 조회 엔드포인트 (인증 없이 접근 가능)."""
+    service = RelatedMovieService(conn, redis)
+    try:
+        return await service.get_related_movies(movie_id, limit=limit)
+    except RelatedMovieNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),

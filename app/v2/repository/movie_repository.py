@@ -297,6 +297,84 @@ class MovieRepository:
 
         return [MovieDTO(**row) for row in rows]
 
+    async def find_by_identifiers(self, identifiers: list[str]) -> list[MovieDTO]:
+        """
+        다양한 외부 식별자로 영화를 일괄 조회합니다.
+
+        Qdrant/Neo4j 후보는 `tmdb_id`, `kobis_movie_cd`, `imdb_id`, `movie_id` 중
+        어느 값을 들고 올지 일정하지 않으므로, 네 필드를 모두 대상으로 매칭한다.
+
+        Args:
+            identifiers: 외부 식별자 문자열 목록
+
+        Returns:
+            MovieDTO 목록
+        """
+        normalized_ids = [str(identifier).strip() for identifier in identifiers if str(identifier).strip()]
+        if not normalized_ids:
+            return []
+
+        unique_ids = list(dict.fromkeys(normalized_ids))
+        placeholders = ", ".join(["%s"] * len(unique_ids))
+        sql = (
+            "SELECT * FROM movies "
+            f"WHERE movie_id IN ({placeholders}) "
+            f"OR CAST(tmdb_id AS CHAR) IN ({placeholders}) "
+            f"OR imdb_id IN ({placeholders}) "
+            f"OR kobis_movie_cd IN ({placeholders})"
+        )
+        params = unique_ids * 4
+
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+
+        return [MovieDTO(**row) for row in rows]
+
+    async def find_by_collection_name(
+        self,
+        collection_name: str,
+        *,
+        exclude_movie_id: str | None = None,
+    ) -> list[MovieDTO]:
+        """
+        동일 컬렉션에 속한 영화를 모두 조회합니다.
+
+        Args:
+            collection_name: movies.collection_name 값
+            exclude_movie_id: 제외할 기준 영화 ID
+
+        Returns:
+            MovieDTO 목록
+        """
+        normalized_collection_name = collection_name.strip()
+        if not normalized_collection_name:
+            return []
+
+        sql = (
+            "SELECT * FROM movies "
+            "WHERE collection_name = %s "
+        )
+        params: list[object] = [normalized_collection_name]
+
+        if exclude_movie_id:
+            sql += "AND movie_id <> %s "
+            params.append(exclude_movie_id)
+
+        sql += (
+            "ORDER BY "
+            "release_year IS NULL ASC, "
+            "release_year ASC, "
+            "vote_count DESC, "
+            "rating DESC"
+        )
+
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+
+        return [MovieDTO(**row) for row in rows]
+
     async def autocomplete_titles(self, prefix: str, limit: int = 10) -> list[str]:
         """
         제목 자동완성 후보를 반환합니다.
