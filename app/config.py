@@ -128,6 +128,8 @@ class Settings(BaseSettings):
     RELATED_MOVIES_LIMIT: int = 25
     # 영화 상세 연관 영화 최종 응답 Redis 캐시 TTL (초)
     RELATED_MOVIES_CACHE_TTL: int = 300
+    # 홈 인기 영화 박스오피스 응답 Redis 캐시 TTL (초, 1일)
+    HOME_BOX_OFFICE_CACHE_TTL: int = 86400
     # 인기 검색어 집계 기간 (시간)
     TRENDING_WINDOW_HOURS: int = 24
     # 인기 검색어 표시 개수

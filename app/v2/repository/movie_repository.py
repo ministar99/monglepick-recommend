@@ -301,8 +301,8 @@ class MovieRepository:
         """
         다양한 외부 식별자로 영화를 일괄 조회합니다.
 
-        Qdrant/Neo4j 후보는 `tmdb_id`, `kobis_movie_cd`, `imdb_id`, `movie_id` 중
-        어느 값을 들고 올지 일정하지 않으므로, 네 필드를 모두 대상으로 매칭한다.
+        Qdrant/Neo4j 후보는 `tmdb_id`, `kobis_movie_cd`, `imdb_id`, `kmdb_id`, `movie_id` 중
+        어느 값을 들고 올지 일정하지 않으므로, 다섯 필드를 모두 대상으로 매칭한다.
 
         Args:
             identifiers: 외부 식별자 문자열 목록
@@ -321,9 +321,148 @@ class MovieRepository:
             f"WHERE movie_id IN ({placeholders}) "
             f"OR CAST(tmdb_id AS CHAR) IN ({placeholders}) "
             f"OR imdb_id IN ({placeholders}) "
-            f"OR kobis_movie_cd IN ({placeholders})"
+            f"OR kobis_movie_cd IN ({placeholders}) "
+            f"OR kmdb_id IN ({placeholders})"
         )
-        params = unique_ids * 4
+        params = unique_ids * 5
+
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+
+        return [MovieDTO(**row) for row in rows]
+
+    async def find_home_box_office_source_movies(self, limit: int = 120) -> list[MovieDTO]:
+        """
+        홈 인기 영화용 박스오피스 원본 후보를 최신 날짜 우선순으로 조회합니다.
+
+        최신 target_dt부터 과거로 내려가며 같은 movie_id는 한 번만 남기고,
+        이후 서비스 레이어가 재개봉/중복 적재 보강을 적용할 수 있도록 movies 원본 레코드를 반환합니다.
+        """
+        normalized_limit = max(1, min(limit, 500))
+        sql = """
+            WITH matched_box_office AS (
+                SELECT
+                    m.movie_id AS movie_id,
+                    b.target_dt AS target_dt,
+                    b.rank_no AS rank_no,
+                    b.audi_cnt AS audi_cnt,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY m.movie_id
+                        ORDER BY b.target_dt DESC, COALESCE(b.rank_no, 999999) ASC, b.audi_cnt DESC, m.movie_id ASC
+                    ) AS movie_occurrence_rank
+                FROM box_office_daily b
+                JOIN movies m
+                  ON (
+                    (b.movie_id IS NOT NULL AND b.movie_id = m.movie_id)
+                    OR (b.movie_id IS NULL AND b.movie_cd = m.kobis_movie_cd)
+                  )
+            ),
+            deduped_box_office AS (
+                SELECT movie_id, target_dt, rank_no, audi_cnt
+                FROM matched_box_office
+                WHERE movie_occurrence_rank = 1
+            )
+            SELECT m.*
+            FROM deduped_box_office d
+            JOIN movies m ON m.movie_id = d.movie_id
+            ORDER BY
+                d.target_dt DESC,
+                COALESCE(d.rank_no, 999999) ASC,
+                d.audi_cnt DESC,
+                d.movie_id ASC
+            LIMIT %s
+        """
+
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, (normalized_limit,))
+            rows = await cur.fetchall()
+
+        return [MovieDTO(**row) for row in rows]
+
+    async def find_with_posters_by_title(
+        self,
+        *,
+        title: str | None,
+        title_en: str | None = None,
+        limit: int = 20,
+    ) -> list[MovieDTO]:
+        """
+        제목 기준으로 포스터가 있는 후보 영화를 조회합니다.
+
+        홈 박스오피스에서 재개봉/중복 적재 레코드의 식별자 매칭이 실패했을 때만
+        사용하는 2차 fallback 입니다. 동명 영화 오탐을 줄이기 위해 부분 일치가 아닌
+        한/영 제목 exact match만 허용합니다.
+        """
+        title_candidates = []
+        for value in (title, title_en):
+            normalized = value.strip() if value and value.strip() else None
+            if normalized and normalized not in title_candidates:
+                title_candidates.append(normalized)
+
+        if not title_candidates:
+            return []
+
+        normalized_limit = max(1, min(limit, 50))
+        conditions: list[str] = []
+        params: list[object] = []
+
+        for candidate in title_candidates:
+            conditions.append("title = %s")
+            params.append(candidate)
+            conditions.append("title_en = %s")
+            params.append(candidate)
+
+        sql = (
+            "SELECT * FROM movies "
+            "WHERE poster_path IS NOT NULL "
+            f"AND ({' OR '.join(conditions)}) "
+            "ORDER BY "
+            "vote_count DESC, "
+            "rating DESC, "
+            "release_year DESC "
+            "LIMIT %s"
+        )
+        params.append(normalized_limit)
+
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+
+        return [MovieDTO(**row) for row in rows]
+
+    async def find_with_posters_by_titles(
+        self,
+        titles: list[str],
+        limit: int = 200,
+    ) -> list[MovieDTO]:
+        """
+        여러 제목 exact match 기준으로 포스터가 있는 후보 영화를 일괄 조회합니다.
+
+        홈 박스오피스 보강 시 title fallback을 배치 처리하여 N+1 쿼리를 방지합니다.
+        """
+        normalized_titles = [
+            title.strip()
+            for title in titles
+            if isinstance(title, str) and title.strip()
+        ]
+        unique_titles = list(dict.fromkeys(normalized_titles))
+        if not unique_titles:
+            return []
+
+        normalized_limit = max(1, min(limit, 500))
+        placeholders = ", ".join(["%s"] * len(unique_titles))
+        sql = (
+            "SELECT * FROM movies "
+            "WHERE poster_path IS NOT NULL "
+            f"AND (title IN ({placeholders}) OR title_en IN ({placeholders})) "
+            "ORDER BY "
+            "vote_count DESC, "
+            "rating DESC, "
+            "release_year DESC "
+            "LIMIT %s"
+        )
+        params = unique_titles + unique_titles + [normalized_limit]
 
         async with self._conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(sql, params)

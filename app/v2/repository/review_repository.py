@@ -233,11 +233,18 @@ class ReviewRepository:
         return int(row["cnt"]) if row and row["cnt"] is not None else 0
 
     async def exists_by_user_movie(self, user_id: str, movie_id: str) -> bool:
-        """동일 사용자의 동일 영화 리뷰 존재 여부를 확인한다."""
+        """동일 사용자의 동일 영화 활성 리뷰 존재 여부를 확인한다."""
+        review_columns = await self._get_columns("reviews")
+        where_clauses = ["user_id = %s", "movie_id = %s"]
+
+        # 소프트 삭제된 리뷰는 재작성 가능해야 하므로 중복 검사에서 제외한다.
+        if "is_deleted" in review_columns:
+            where_clauses.append("COALESCE(is_deleted, 0) = 0")
+
         sql = (
             "SELECT 1 "
             "FROM reviews "
-            "WHERE user_id = %s AND movie_id = %s "
+            f"WHERE {' AND '.join(where_clauses)} "
             "LIMIT 1"
         )
         async with self._conn.cursor(aiomysql.DictCursor) as cur:
