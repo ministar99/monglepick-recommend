@@ -46,6 +46,8 @@ class MovieDetailNotFoundError(LookupError):
 class SearchService:
     """영화 검색 비즈니스 로직 서비스 (v2 Raw SQL)"""
 
+    HOME_BOX_OFFICE_CACHE_KEY_PREFIX = "home_box_office:v2:"
+
     def __init__(self, conn: aiomysql.Connection, redis_client: aioredis.Redis | None = None):
         """
         Args:
@@ -224,6 +226,72 @@ class SearchService:
             search_source=search_source,
         )
 
+    async def get_home_box_office_movies(
+        self,
+        *,
+        page: int = 1,
+        size: int = 12,
+    ) -> MovieSearchResponse:
+        """
+        홈 인기 영화 섹션용 박스오피스 영화를 반환합니다.
+
+        최신 `box_office_daily.target_dt`부터 과거로 내려가며 영화를 모으고,
+        재개봉/중복 적재 레코드는 더 풍부한 원본 영화 레코드로 치환합니다.
+        """
+        normalized_page = max(1, page)
+        normalized_size = min(max(1, size), 30)
+        cache_key = self._home_box_office_cache_key(normalized_page, normalized_size)
+
+        cached_response = await self._read_cached_home_box_office_movies(cache_key)
+        if cached_response is not None:
+            return cached_response
+
+        required_unique_count = normalized_page * normalized_size
+        source_limit = max(required_unique_count * 8, 120)
+
+        source_movies = await self._movie_repo.find_home_box_office_source_movies(limit=source_limit)
+        candidate_lookup = await self._build_home_box_office_candidate_lookup(source_movies)
+        title_lookup = await self._build_home_box_office_title_lookup(source_movies)
+
+        unique_display_movies: list[MovieDTO] = []
+        seen_movie_ids: set[str] = set()
+
+        for source_movie in source_movies:
+            display_movie = self._resolve_home_box_office_display_movie(
+                source_movie,
+                candidate_lookup=candidate_lookup,
+                title_lookup=title_lookup,
+            )
+            if display_movie.movie_id in seen_movie_ids:
+                continue
+
+            unique_display_movies.append(display_movie)
+            seen_movie_ids.add(display_movie.movie_id)
+
+            if len(unique_display_movies) >= required_unique_count:
+                break
+
+        start = (normalized_page - 1) * normalized_size
+        end = start + normalized_size
+        page_movies = unique_display_movies[start:end]
+        total = len(unique_display_movies)
+        total_pages = ceil(total / normalized_size) if total > 0 else 0
+
+        response = MovieSearchResponse(
+            movies=[self._to_movie_brief(movie) for movie in page_movies],
+            pagination=PaginationMeta(
+                page=normalized_page,
+                size=normalized_size,
+                total=total,
+                total_pages=total_pages,
+            ),
+            did_you_mean=None,
+            related_queries=[],
+            search_source="mysql",
+        )
+        await self._write_cached_home_box_office_movies(cache_key, response)
+        return response
+
     async def get_recent_searches(
         self,
         user_id: str,
@@ -357,6 +425,7 @@ class SearchService:
             genres=movie.get_genres_list(),
             release_year=movie.release_year,
             rating=movie.rating,
+            vote_count=movie.vote_count,
             poster_url=poster_url,
             trailer_url=movie.trailer_url,
             overview=movie.overview,
@@ -440,3 +509,219 @@ class SearchService:
         if isinstance(value, str):
             return value.strip() or None
         return str(value)
+
+    @classmethod
+    def _home_box_office_cache_key(cls, page: int, size: int) -> str:
+        """홈 인기 영화 박스오피스 캐시 키를 생성합니다."""
+        return f"{cls.HOME_BOX_OFFICE_CACHE_KEY_PREFIX}page:{page}:size:{size}"
+
+    async def _read_cached_home_box_office_movies(
+        self,
+        cache_key: str,
+    ) -> MovieSearchResponse | None:
+        """Redis에 저장된 홈 박스오피스 응답을 복원합니다."""
+        if self._redis is None:
+            return None
+
+        try:
+            cached = await self._redis.get(cache_key)
+            if not cached:
+                return None
+            return MovieSearchResponse.model_validate_json(cached)
+        except Exception as exc:
+            logger.warning("home_box_office_cache_read_error key=%s error=%s", cache_key, exc)
+            return None
+
+    async def _write_cached_home_box_office_movies(
+        self,
+        cache_key: str,
+        response: MovieSearchResponse,
+    ) -> None:
+        """홈 박스오피스 응답을 Redis에 best-effort로 저장합니다."""
+        if self._redis is None:
+            return
+
+        try:
+            await self._redis.setex(
+                cache_key,
+                self._settings.HOME_BOX_OFFICE_CACHE_TTL,
+                response.model_dump_json(),
+            )
+        except Exception as exc:
+            logger.warning("home_box_office_cache_write_error key=%s error=%s", cache_key, exc)
+
+    async def _build_home_box_office_candidate_lookup(
+        self,
+        source_movies: list[MovieDTO],
+    ) -> dict[str, list[MovieDTO]]:
+        """식별자 기준 후보 영화를 한 번에 조회해 lookup 맵으로 구성합니다."""
+        identifiers: list[str] = []
+        for source_movie in source_movies:
+            identifiers.extend(self._build_movie_identifiers(source_movie))
+
+        candidates = await self._movie_repo.find_by_identifiers(identifiers)
+        lookup: dict[str, dict[str, MovieDTO]] = {}
+
+        for candidate in candidates:
+            for identifier in self._build_movie_identifiers(candidate):
+                bucket = lookup.setdefault(identifier, {})
+                bucket[candidate.movie_id] = candidate
+
+        return {
+            identifier: list(bucket.values())
+            for identifier, bucket in lookup.items()
+        }
+
+    async def _build_home_box_office_title_lookup(
+        self,
+        source_movies: list[MovieDTO],
+    ) -> dict[str, list[MovieDTO]]:
+        """제목 exact match fallback 후보를 한 번에 조회해 lookup 맵으로 구성합니다."""
+        titles: list[str] = []
+        for movie in source_movies:
+            if movie.title and movie.title.strip():
+                titles.append(movie.title.strip())
+            if movie.title_en and movie.title_en.strip():
+                titles.append(movie.title_en.strip())
+
+        candidates = await self._movie_repo.find_with_posters_by_titles(titles)
+        lookup: dict[str, dict[str, MovieDTO]] = {}
+
+        for candidate in candidates:
+            for title in (candidate.title, candidate.title_en):
+                if not title or not title.strip():
+                    continue
+                normalized_title = title.strip()
+                bucket = lookup.setdefault(normalized_title, {})
+                bucket[candidate.movie_id] = candidate
+
+        return {
+            title: list(bucket.values())
+            for title, bucket in lookup.items()
+        }
+
+    def _resolve_home_box_office_display_movie(
+        self,
+        source_movie: MovieDTO,
+        *,
+        candidate_lookup: dict[str, list[MovieDTO]],
+        title_lookup: dict[str, list[MovieDTO]],
+    ) -> MovieDTO:
+        """재개봉/중복 적재 후보 중 홈 카드에 가장 적합한 대표 레코드를 선택합니다."""
+        candidates = self._collect_candidates_by_identifiers(
+            self._build_movie_identifiers(source_movie),
+            candidate_lookup,
+        )
+        best_movie = max(
+            candidates or [source_movie],
+            key=lambda movie: (
+                self._home_box_office_display_score(movie),
+                movie.vote_count or 0,
+                movie.rating or 0.0,
+                movie.release_year or 0,
+            ),
+        )
+
+        # 강한 식별자 매칭으로도 포스터가 없으면 제목 exact match 후보를 2차 fallback으로 사용한다.
+        if not best_movie.poster_path:
+            title_candidates = self._collect_candidates_by_titles(
+                source_movie.title,
+                source_movie.title_en,
+                title_lookup,
+            )
+            if title_candidates:
+                merged_candidates: dict[str, MovieDTO] = {
+                    movie.movie_id: movie for movie in (candidates or [source_movie])
+                }
+                for candidate in title_candidates:
+                    merged_candidates.setdefault(candidate.movie_id, candidate)
+
+                best_movie = max(
+                    merged_candidates.values(),
+                    key=lambda movie: (
+                        self._home_box_office_display_score(movie),
+                        movie.vote_count or 0,
+                        movie.rating or 0.0,
+                        movie.release_year or 0,
+                    ),
+                )
+
+        return best_movie
+
+    @staticmethod
+    def _collect_candidates_by_identifiers(
+        identifiers: list[str],
+        candidate_lookup: dict[str, list[MovieDTO]],
+    ) -> list[MovieDTO]:
+        """식별자 lookup에서 후보 영화를 dedupe하여 반환합니다."""
+        merged: dict[str, MovieDTO] = {}
+        for identifier in identifiers:
+            for candidate in candidate_lookup.get(identifier, []):
+                merged[candidate.movie_id] = candidate
+        return list(merged.values())
+
+    @staticmethod
+    def _collect_candidates_by_titles(
+        title: str | None,
+        title_en: str | None,
+        title_lookup: dict[str, list[MovieDTO]],
+    ) -> list[MovieDTO]:
+        """제목 lookup에서 후보 영화를 dedupe하여 반환합니다."""
+        merged: dict[str, MovieDTO] = {}
+        for raw_title in (title, title_en):
+            normalized_title = raw_title.strip() if raw_title and raw_title.strip() else None
+            if not normalized_title:
+                continue
+            for candidate in title_lookup.get(normalized_title, []):
+                merged[candidate.movie_id] = candidate
+        return list(merged.values())
+
+    @staticmethod
+    def _build_movie_identifiers(movie: MovieDTO) -> list[str]:
+        """같은 영화 후보를 찾기 위한 식별자 목록을 구성합니다."""
+        identifiers: list[str] = [movie.movie_id]
+
+        if movie.tmdb_id is not None:
+            identifiers.append(str(movie.tmdb_id))
+        if movie.imdb_id:
+            identifiers.append(movie.imdb_id)
+        if movie.kobis_movie_cd:
+            identifiers.append(movie.kobis_movie_cd)
+        if movie.kmdb_id:
+            identifiers.append(movie.kmdb_id)
+
+        return list(dict.fromkeys([identifier.strip() for identifier in identifiers if identifier and identifier.strip()]))
+
+    @staticmethod
+    def _home_box_office_display_score(movie: MovieDTO) -> int:
+        """홈 카드/상세 진입 품질 기준의 메타데이터 점수를 계산합니다."""
+        score = 0
+
+        if movie.poster_path:
+            score += 100
+        if movie.overview and movie.overview.strip():
+            score += 40
+        if movie.backdrop_path:
+            score += 12
+        if movie.genres:
+            score += 8
+        if movie.rating is not None:
+            score += 8
+        if movie.vote_count:
+            score += 6
+        if movie.kobis_open_dt:
+            score += 4
+        if movie.release_year is not None:
+            score += 2
+
+        source = (movie.source or "").strip().lower()
+        if source == "tmdb":
+            score += 5
+        elif source == "kmdb":
+            score += 3
+        elif source == "kobis":
+            score += 2
+        elif source == "kaggle":
+            score += 1
+
+        return score
