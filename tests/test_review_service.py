@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.v2.repository.review_repository import ReviewRepository
 from app.v2.service.review_service import ReviewService
 
 
@@ -25,6 +26,39 @@ def _make_review_row(*, liked):
         "like_count": 7,
         "liked": liked,
     }
+
+
+class _FakeCursor:
+    def __init__(self, row):
+        self._row = row
+        self.executed_sql = None
+        self.executed_params = None
+
+    async def execute(self, sql, params=None):
+        self.executed_sql = sql
+        self.executed_params = params
+
+    async def fetchone(self):
+        return self._row
+
+
+class _FakeCursorContext:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    async def __aenter__(self):
+        return self._cursor
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self, *_args, **_kwargs):
+        return _FakeCursorContext(self._cursor)
 
 
 @pytest.mark.asyncio
@@ -67,3 +101,17 @@ async def test_get_user_reviews_BIT값도_좋아요상태로_정규화한다():
     assert result.pagination.total == 1
     assert len(result.reviews) == 1
     assert result.reviews[0].liked is True
+
+
+@pytest.mark.asyncio
+async def test_exists_by_user_movie_소프트삭제된리뷰는_중복검사에서_제외한다():
+    fake_cursor = _FakeCursor(row=None)
+    repo = ReviewRepository(conn=_FakeConn(fake_cursor))
+    repo._get_columns = AsyncMock(return_value={"review_id", "user_id", "movie_id", "is_deleted"})
+
+    result = await repo.exists_by_user_movie("user_1", "movie_1")
+
+    assert result is False
+    repo._get_columns.assert_awaited_once_with("reviews")
+    assert "COALESCE(is_deleted, 0) = 0" in fake_cursor.executed_sql
+    assert fake_cursor.executed_params == ("user_1", "movie_1")

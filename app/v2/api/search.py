@@ -154,6 +154,23 @@ async def log_search_click(
 
 
 @router.get(
+    "/home/box-office",
+    response_model=MovieSearchResponse,
+    summary="홈 인기 영화 박스오피스 목록",
+    description="최신 일자부터 과거로 내려가며 홈 인기 영화 섹션에 노출할 박스오피스 영화를 반환합니다.",
+)
+async def get_home_box_office_movies(
+    page: int = Query(default=1, description="페이지 번호 (1부터)", ge=1),
+    size: int = Query(default=12, description="페이지 크기 (최대 30)", ge=1, le=30),
+    conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
+):
+    """홈 인기 영화용 박스오피스 목록 조회 엔드포인트 (인증 없이 접근 가능)."""
+    service = SearchService(conn, redis)
+    return await service.get_home_box_office_movies(page=page, size=size)
+
+
+@router.get(
     "/movies/{movie_id}",
     response_model=MovieDetailResponse,
     summary="영화 상세 조회",
