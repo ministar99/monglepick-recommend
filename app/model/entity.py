@@ -27,12 +27,13 @@ DDL 기준: Backend JPA 엔티티 (ddl-auto=update, 진실 원본)
 """
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     Index,
@@ -81,6 +82,8 @@ class Movie(Base):
     backdrop_path: str | None = Column(String(500), nullable=True, comment="TMDB 배경 이미지 경로")
     # 개봉 연도 (DDL: release_year INT)
     release_year: int | None = Column(Integer, nullable=True, comment="개봉 연도")
+    # 개봉일 (DDL: release_date DATE)
+    release_date: date | None = Column(Date, nullable=True, comment="개봉일")
     # 상영 시간 (분)
     runtime: int | None = Column(Integer, nullable=True, comment="상영 시간 (분)")
     # 평균 평점 (0~10)

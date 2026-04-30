@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 class MovieRepository:
     """영화 테이블 조회 리포지토리 (Raw SQL)"""
 
+    _VALID_POSTER_PATH_SQL = (
+        "poster_path IS NOT NULL "
+        "AND TRIM(poster_path) <> '' "
+        "AND poster_path NOT LIKE 'http://%%' "
+        "AND poster_path NOT LIKE 'https://%%' "
+        "AND poster_path LIKE '/%%'"
+    )
+
     def __init__(self, conn: aiomysql.Connection):
         """
         Args:
@@ -415,7 +423,7 @@ class MovieRepository:
 
         sql = (
             "SELECT * FROM movies "
-            "WHERE poster_path IS NOT NULL "
+            f"WHERE {self._VALID_POSTER_PATH_SQL} "
             f"AND ({' OR '.join(conditions)}) "
             "ORDER BY "
             "vote_count DESC, "
@@ -454,7 +462,7 @@ class MovieRepository:
         placeholders = ", ".join(["%s"] * len(unique_titles))
         sql = (
             "SELECT * FROM movies "
-            "WHERE poster_path IS NOT NULL "
+            f"WHERE {self._VALID_POSTER_PATH_SQL} "
             f"AND (title IN ({placeholders}) OR title_en IN ({placeholders})) "
             "ORDER BY "
             "vote_count DESC, "
@@ -588,7 +596,7 @@ class MovieRepository:
             "SELECT * FROM movies "
             "WHERE JSON_CONTAINS(genres, JSON_QUOTE(%s)) "
             "AND rating >= %s "
-            "AND poster_path IS NOT NULL "
+            f"AND {self._VALID_POSTER_PATH_SQL} "
             "ORDER BY rating DESC "
             "LIMIT %s"
         )
@@ -630,7 +638,7 @@ class MovieRepository:
                 "SELECT * FROM movies "
                 "WHERE JSON_CONTAINS(genres, JSON_QUOTE(%s)) "
                 "AND rating >= %s "
-                "AND poster_path IS NOT NULL "
+                f"AND {self._VALID_POSTER_PATH_SQL} "
                 "ORDER BY RAND() "
                 "LIMIT %s"
             )
@@ -653,7 +661,7 @@ class MovieRepository:
                 sql = (
                     f"SELECT * FROM movies "
                     f"WHERE movie_id NOT IN ({placeholders}) "
-                    f"AND poster_path IS NOT NULL "
+                    f"AND {self._VALID_POSTER_PATH_SQL} "
                     f"AND rating >= %s "
                     f"ORDER BY rating DESC "
                     f"LIMIT %s"
@@ -662,7 +670,7 @@ class MovieRepository:
             else:
                 sql = (
                     "SELECT * FROM movies "
-                    "WHERE poster_path IS NOT NULL "
+                    f"WHERE {self._VALID_POSTER_PATH_SQL} "
                     "AND rating >= %s "
                     "ORDER BY rating DESC "
                     "LIMIT %s"

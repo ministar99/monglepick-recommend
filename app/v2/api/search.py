@@ -26,6 +26,7 @@ from app.model.schema import (
     AutocompleteResponse,
     MovieDetailResponse,
     MovieSearchResponse,
+    PersonalizedTopPicksResponse,
     RecentSearchResponse,
     RelatedMoviesResponse,
     SearchClickLogRequest,
@@ -35,6 +36,7 @@ from app.model.schema import (
 from app.search_genre_catalog import normalize_search_genre_labels
 from app.v2.service.related_movie_service import RelatedMovieNotFoundError, RelatedMovieService
 from app.v2.service.autocomplete_service import AutocompleteService
+from app.v2.service.personalized_search_service import PersonalizedSearchService
 from app.v2.service.search_service import MovieDetailNotFoundError, SearchService
 from app.v2.service.trending_service import TrendingService
 
@@ -168,6 +170,27 @@ async def get_home_box_office_movies(
     """홈 인기 영화용 박스오피스 목록 조회 엔드포인트 (인증 없이 접근 가능)."""
     service = SearchService(conn, redis)
     return await service.get_home_box_office_movies(page=page, size=size)
+
+
+@router.get(
+    "/personalized/top-picks",
+    response_model=PersonalizedTopPicksResponse,
+    summary="검색 초기 화면 개인화 추천 TOP picks",
+    description=(
+        "로그인 사용자의 최애 영화/장르, 위시리스트, 내 리뷰, "
+        "co-watched CF, 박스오피스 fallback을 조합해 검색 초기 화면용 "
+        "개인화 추천 TOP picks를 반환합니다."
+    ),
+)
+async def get_personalized_top_picks(
+    limit: int = Query(default=10, description="최대 반환 개수", ge=1, le=20),
+    conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
+    user_id: str = Depends(get_current_user),
+):
+    """검색 초기 화면 전용 개인화 예상 픽 조회 엔드포인트."""
+    service = PersonalizedSearchService(conn, redis)
+    return await service.get_top_picks(user_id=user_id, limit=limit)
 
 
 @router.get(

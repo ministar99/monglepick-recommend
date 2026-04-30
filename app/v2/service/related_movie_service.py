@@ -25,6 +25,11 @@ from app.model.schema import RelatedMovieItem, RelatedMoviesResponse
 from app.search_elasticsearch import ESSearchMovieItem, ElasticsearchSearchClient
 from app.v2.model.dto import MovieDTO
 from app.v2.repository.movie_repository import MovieRepository
+from app.v2.service.poster_policy import (
+    build_tmdb_poster_url,
+    collect_exact_title_candidates,
+    is_valid_internal_poster_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +117,10 @@ class RelatedMovieService:
     """컬렉션 우선 + Qdrant 기반 연관 영화 서비스입니다."""
 
     _CACHE_PREFIX = "related:movies"
-    _CACHE_VERSION = "v4"
+    _CACHE_VERSION = "v6"
+    _TITLE_LOOKUP_WINDOW_MULTIPLIER = 3
+    _TITLE_LOOKUP_MIN_CANDIDATES = 30
+    _TITLE_LOOKUP_MAX_CANDIDATES = 60
 
     def __init__(
         self,
@@ -146,7 +154,11 @@ class RelatedMovieService:
             collection_movies_from_es = None
 
         if collection_movies_from_es is not None:
-            related_items = self._build_collection_es_movie_items(collection_movies_from_es)
+            title_lookup = await self._build_title_lookup(es_movies=collection_movies_from_es)
+            related_items = self._build_collection_es_movie_items(
+                collection_movies_from_es,
+                title_lookup=title_lookup,
+            )
             return RelatedMoviesResponse(movies=related_items)
 
         try:
@@ -161,7 +173,11 @@ class RelatedMovieService:
         except Exception as exc:
             logger.warning("related_collection_fetch_failed movie_id=%s error=%s", movie.movie_id, exc)
             collection_movies = []
-        related_items = self._build_collection_movie_items(collection_movies)
+        title_lookup = await self._build_title_lookup(dto_movies=collection_movies)
+        related_items = self._build_collection_movie_items(
+            collection_movies,
+            title_lookup=title_lookup,
+        )
         return RelatedMoviesResponse(movies=related_items)
 
     async def get_related_movies(
@@ -207,7 +223,7 @@ class RelatedMovieService:
         try:
             qdrant_result = await self._fetch_qdrant_candidates(
                 movie,
-                limit=max(normalized_limit * 4, 80) if movie.collection_name else max(normalized_limit * 2, 20),
+                limit=max(normalized_limit * 3, 40) if movie.collection_name else max(normalized_limit * 2, 20),
             )
             qdrant_fetch_succeeded = True
             self._merge_candidate_maps(candidate_map, qdrant_result)
@@ -215,12 +231,21 @@ class RelatedMovieService:
             logger.warning("related_movies_qdrant_failed movie_id=%s error=%s", movie.movie_id, exc)
 
         candidate_movies = await self._movie_repo.find_by_identifiers(list(candidate_map.keys())) if candidate_map else []
+        title_lookup = await self._build_title_lookup(
+            dto_movies=self._select_title_lookup_dto_movies(
+                collection_movies=collection_movies,
+                candidate_map=candidate_map,
+                candidate_movies=candidate_movies,
+                limit=normalized_limit,
+            ),
+        )
         related_items = self._build_related_movie_items(
             source_movie=movie,
             collection_movies=collection_movies,
             candidate_map=candidate_map,
             candidate_movies=candidate_movies,
             limit=normalized_limit,
+            title_lookup=title_lookup,
         )
         if related_items:
             response = RelatedMoviesResponse(movies=related_items)
@@ -289,18 +314,26 @@ class RelatedMovieService:
                 cast_members=movie.get_cast_list(),
                 genres=movie.get_genres_list(),
                 collection_name=movie.collection_name,
-                limit=max(limit * 2, 50),
+                limit=max(limit * 2, 30),
             ),
         )
         if not collection_movies and not es_movies:
             return []
 
+        title_lookup = await self._build_title_lookup(
+            es_movies=self._select_title_lookup_es_movies(
+                collection_movies=collection_movies or [],
+                candidate_movies=es_movies or [],
+                limit=limit,
+            ),
+        )
         return self._build_es_related_movie_items(
             source_movie=movie,
             collection_movies=collection_movies or [],
             candidate_movies=es_movies or [],
             limit=limit,
             include_collection_movies=False,
+            title_lookup=title_lookup,
         )
 
     def _merge_candidate_maps(
@@ -328,6 +361,139 @@ class RelatedMovieService:
                 if source not in target.sources:
                     target.sources.append(source)
 
+    async def _build_title_lookup(
+        self,
+        *,
+        dto_movies: list[MovieDTO] | None = None,
+        es_movies: list[ESSearchMovieItem] | None = None,
+        limit: int = 200,
+    ) -> dict[str, list[MovieDTO]]:
+        """무효 포스터 후보를 제목 exact match 영화로 치환하기 위한 lookup을 구성합니다."""
+        titles: list[str] = []
+        for movie in dto_movies or []:
+            if self._has_movie_poster(movie):
+                continue
+            titles.extend(collect_exact_title_candidates(movie.title, movie.title_en))
+        for movie in es_movies or []:
+            if self._has_es_poster(movie):
+                continue
+            titles.extend(collect_exact_title_candidates(movie.title, movie.title_en))
+
+        if not titles:
+            return {}
+
+        normalized_limit = max(1, min(limit, 200))
+        unique_titles = list(dict.fromkeys(titles))[:normalized_limit]
+        candidates = await self._movie_repo.find_with_posters_by_titles(
+            unique_titles,
+            limit=min(normalized_limit * 2, 200),
+        )
+        lookup: dict[str, dict[str, MovieDTO]] = {}
+        for candidate in candidates:
+            for title in collect_exact_title_candidates(candidate.title, candidate.title_en):
+                bucket = lookup.setdefault(title, {})
+                bucket[candidate.movie_id] = candidate
+        return {
+            title: list(bucket.values())
+            for title, bucket in lookup.items()
+        }
+
+    @classmethod
+    def _title_lookup_window_size(cls, limit: int) -> int:
+        """title fallback lookup에 사용할 후보 영화 최대 개수입니다."""
+        return min(
+            max(limit * cls._TITLE_LOOKUP_WINDOW_MULTIPLIER, cls._TITLE_LOOKUP_MIN_CANDIDATES),
+            cls._TITLE_LOOKUP_MAX_CANDIDATES,
+        )
+
+    def _select_title_lookup_dto_movies(
+        self,
+        *,
+        collection_movies: list[MovieDTO],
+        candidate_map: dict[str, RelatedCandidate],
+        candidate_movies: list[MovieDTO],
+        limit: int,
+    ) -> list[MovieDTO]:
+        """Qdrant 후보 중 상위 노출권 영화만 골라 title lookup 비용을 줄입니다."""
+        lookup_window = self._title_lookup_window_size(limit)
+        selected: list[MovieDTO] = []
+        seen_ids: set[str] = set()
+
+        for movie in self._sort_collection_movie_dtos(collection_movies):
+            movie_id = str(movie.movie_id or "").strip()
+            if not movie_id or movie_id in seen_ids:
+                continue
+            selected.append(movie)
+            seen_ids.add(movie_id)
+            if len(selected) >= lookup_window:
+                return selected
+
+        for movie in sorted(
+            candidate_movies,
+            key=lambda item: self._candidate_lookup_sort_key(item, candidate_map),
+            reverse=True,
+        ):
+            movie_id = str(movie.movie_id or "").strip()
+            if not movie_id or movie_id in seen_ids:
+                continue
+            selected.append(movie)
+            seen_ids.add(movie_id)
+            if len(selected) >= lookup_window:
+                break
+
+        return selected
+
+    def _select_title_lookup_es_movies(
+        self,
+        *,
+        collection_movies: list[ESSearchMovieItem],
+        candidate_movies: list[ESSearchMovieItem],
+        limit: int,
+    ) -> list[ESSearchMovieItem]:
+        """ES fallback 결과에서도 상위 일부만 title lookup 대상으로 삼습니다."""
+        lookup_window = self._title_lookup_window_size(limit)
+        selected: list[ESSearchMovieItem] = []
+        seen_ids: set[str] = set()
+
+        for movie in [*collection_movies, *candidate_movies]:
+            movie_id = str(movie.movie_id or "").strip()
+            if not movie_id or movie_id in seen_ids:
+                continue
+            selected.append(movie)
+            seen_ids.add(movie_id)
+            if len(selected) >= lookup_window:
+                break
+
+        return selected
+
+    def _candidate_lookup_sort_key(
+        self,
+        movie: MovieDTO,
+        candidate_map: dict[str, RelatedCandidate],
+    ) -> tuple[float, int, float, float, int, int]:
+        """동일 영화에 연결된 후보 점수 중 가장 강한 값을 기준으로 lookup 우선순위를 정합니다."""
+        best_similarity = 0.0
+        best_rank = 10_000
+        best_score = 0.0
+
+        for identifier in self._build_movie_identifiers(movie):
+            candidate = candidate_map.get(identifier)
+            if candidate is None:
+                continue
+            best_similarity = max(best_similarity, candidate.qdrant_vector_similarity)
+            best_score = max(best_score, candidate.score)
+            if candidate.qdrant_vector_rank is not None:
+                best_rank = min(best_rank, candidate.qdrant_vector_rank)
+
+        return (
+            best_similarity,
+            -best_rank,
+            best_score,
+            movie.rating or 0.0,
+            movie.vote_count or 0,
+            movie.release_year or 0,
+        )
+
     def _build_es_related_movie_items(
         self,
         *,
@@ -336,27 +502,41 @@ class RelatedMovieService:
         candidate_movies: list[ESSearchMovieItem],
         limit: int,
         include_collection_movies: bool = True,
+        title_lookup: dict[str, list[MovieDTO]] | None = None,
     ) -> list[RelatedMovieItem]:
         """ES 검색 결과를 연관 영화 응답 모델로 변환합니다."""
-        collection_movies_with_poster = [
-            movie for movie in collection_movies if self._has_es_poster(movie)
+        resolved_title_lookup = title_lookup or {}
+        collection_movie_entries = [
+            (movie, self._resolve_display_movie_from_es(movie, resolved_title_lookup))
+            for movie in collection_movies
         ]
-        candidate_movies_with_poster = [
-            movie for movie in candidate_movies if self._has_es_poster(movie)
+        collection_movie_entries = [
+            (movie, display_movie)
+            for movie, display_movie in collection_movie_entries
+            if display_movie is not None
+        ]
+        candidate_movie_entries = [
+            (movie, self._resolve_display_movie_from_es(movie, resolved_title_lookup))
+            for movie in candidate_movies
+        ]
+        candidate_movie_entries = [
+            (movie, display_movie)
+            for movie, display_movie in candidate_movie_entries
+            if display_movie is not None
         ]
         source_genres = set(source_movie.get_genres_list())
         source_cast = set(source_movie.get_cast_list())
         source_director = (source_movie.director or "").strip()
         source_collection = (source_movie.collection_name or "").strip()
         collection_ids = {
-            movie.movie_id
-            for movie in collection_movies_with_poster
-            if movie.movie_id
+            self._resolved_movie_id(display_movie)
+            for _movie, display_movie in collection_movie_entries
+            if self._resolved_movie_id(display_movie)
         }
         desired_total = max(limit, len(collection_ids)) if include_collection_movies else limit
         related_movie_map = {
-            movie.movie_id: movie
-            for movie in candidate_movies_with_poster
+            movie.movie_id: (movie, display_movie)
+            for movie, display_movie in candidate_movie_entries
             if movie.movie_id
         }
 
@@ -364,8 +544,19 @@ class RelatedMovieService:
         seen_ids: set[str] = set()
 
         if include_collection_movies:
-            for collection_movie in self._sort_collection_movies(collection_movies_with_poster):
-                merged_movie = related_movie_map.get(collection_movie.movie_id, collection_movie)
+            for collection_movie, display_movie in sorted(
+                collection_movie_entries,
+                key=lambda item: (
+                    item[0].release_year is None,
+                    item[0].release_year or 0,
+                    -(item[0].vote_count or 0),
+                    item[0].title,
+                ),
+            ):
+                merged_movie, merged_display_movie = related_movie_map.get(
+                    collection_movie.movie_id,
+                    (collection_movie, display_movie),
+                )
                 self._append_es_related_movie_item(
                     related_items=related_items,
                     seen_ids=seen_ids,
@@ -375,25 +566,36 @@ class RelatedMovieService:
                     source_director=source_director,
                     source_collection=source_collection,
                     candidate=merged_movie,
+                    display_movie=merged_display_movie,
                     relation_sources=["elasticsearch_collection", "elasticsearch_related"]
                     if merged_movie.movie_id in related_movie_map
                     else ["elasticsearch_collection"],
                 )
 
-        for movie in self._sort_general_es_candidates(
-            candidate_movies=candidate_movies_with_poster,
-            source_genres=source_genres,
-            source_cast=source_cast,
-            source_director=source_director,
-            source_collection=source_collection,
-        ):
+        sorted_candidate_entries = sorted(
+            candidate_movie_entries,
+            key=lambda item: (
+                self._calculate_es_relation_score(
+                    source_genres=source_genres,
+                    source_cast=source_cast,
+                    source_director=source_director,
+                    source_collection=source_collection,
+                    candidate=item[0],
+                ),
+                item[0].rating or 0.0,
+                item[0].vote_count or 0,
+                item[0].release_year or 0,
+            ),
+            reverse=True,
+        )
+        for movie, display_movie in sorted_candidate_entries:
             if len(related_items) >= desired_total:
                 break
             candidate_collection = (movie.collection_name or "").strip()
             if (
                 not include_collection_movies
                 and (
-                    movie.movie_id in collection_ids
+                    self._resolved_movie_id(display_movie) in collection_ids
                     or (
                         source_collection
                         and candidate_collection
@@ -411,6 +613,7 @@ class RelatedMovieService:
                 source_director=source_director,
                 source_collection=source_collection,
                 candidate=movie,
+                display_movie=display_movie,
                 relation_sources=["elasticsearch_related"],
             )
 
@@ -419,52 +622,57 @@ class RelatedMovieService:
     def _build_collection_movie_items(
         self,
         collection_movies: list[MovieDTO],
+        *,
+        title_lookup: dict[str, list[MovieDTO]] | None = None,
     ) -> list[RelatedMovieItem]:
         """같은 컬렉션 작품만 별도 섹션용 응답으로 변환합니다."""
         related_items: list[RelatedMovieItem] = []
+        seen_movie_ids: set[str] = set()
         for collection_movie in self._sort_collection_movie_dtos(collection_movies):
-            if not self._has_movie_poster(collection_movie):
+            display_movie = self._resolve_display_movie_dto(collection_movie, title_lookup or {})
+            if display_movie is None or display_movie.movie_id in seen_movie_ids:
                 continue
+            seen_movie_ids.add(display_movie.movie_id)
             collection_candidate = RelatedCandidate()
-            self._decorate_collection_candidate(collection_candidate, collection_movie.collection_name)
+            self._decorate_collection_candidate(
+                collection_candidate,
+                collection_movie.collection_name or display_movie.collection_name,
+            )
             related_items.append(
-                self._to_related_movie_item(movie=collection_movie, candidate=collection_candidate)
+                self._to_related_movie_item(movie=display_movie, candidate=collection_candidate)
             )
         return related_items
 
     def _build_collection_es_movie_items(
         self,
         collection_movies: list[ESSearchMovieItem],
+        *,
+        title_lookup: dict[str, list[MovieDTO]] | None = None,
     ) -> list[RelatedMovieItem]:
         """ES 컬렉션 검색 결과를 컬렉션 전용 응답 모델로 변환합니다."""
         related_items: list[RelatedMovieItem] = []
+        seen_movie_ids: set[str] = set()
         for collection_movie in self._sort_collection_movies(collection_movies):
-            if not collection_movie.movie_id or not self._has_es_poster(collection_movie):
+            display_movie = self._resolve_display_movie_from_es(collection_movie, title_lookup or {})
+            resolved_movie_id = self._resolved_movie_id(display_movie)
+            if display_movie is None or not resolved_movie_id or resolved_movie_id in seen_movie_ids:
                 continue
+            seen_movie_ids.add(resolved_movie_id)
 
             collection_candidate = RelatedCandidate(sources=["elasticsearch_collection"])
-            self._decorate_collection_candidate(collection_candidate, collection_movie.collection_name)
-
-            poster_url = None
-            if collection_movie.poster_path:
-                poster_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{collection_movie.poster_path}"
+            self._decorate_collection_candidate(
+                collection_candidate,
+                collection_movie.collection_name
+                or getattr(display_movie, "collection_name", None),
+            )
+            if isinstance(display_movie, MovieDTO):
+                related_items.append(
+                    self._to_related_movie_item(movie=display_movie, candidate=collection_candidate)
+                )
+                continue
 
             related_items.append(
-                RelatedMovieItem(
-                    movie_id=collection_movie.movie_id,
-                    title=collection_movie.title,
-                    title_en=collection_movie.title_en,
-                    genres=collection_movie.genres,
-                    release_year=collection_movie.release_year,
-                    rating=collection_movie.rating,
-                    vote_count=collection_movie.vote_count,
-                    poster_url=poster_url,
-                    trailer_url=collection_movie.trailer_url,
-                    overview=collection_movie.overview,
-                    relation_score=round(collection_candidate.score, 4),
-                    relation_reasons=self._prioritize_relation_reasons(collection_candidate.reasons)[:3],
-                    relation_sources=collection_candidate.sources,
-                )
+                self._to_related_movie_item_from_es(movie=display_movie, candidate=collection_candidate)
             )
         return related_items
 
@@ -520,17 +728,19 @@ class RelatedMovieService:
         source_director: str,
         source_collection: str,
         candidate: ESSearchMovieItem,
+        display_movie: ESSearchMovieItem | MovieDTO | None,
         relation_sources: list[str],
     ) -> None:
+        resolved_movie_id = self._resolved_movie_id(display_movie)
         if (
-            not candidate.movie_id
-            or candidate.movie_id == source_movie.movie_id
-            or candidate.movie_id in seen_ids
-            or not self._has_es_poster(candidate)
+            display_movie is None
+            or not resolved_movie_id
+            or resolved_movie_id == source_movie.movie_id
+            or resolved_movie_id in seen_ids
         ):
             return
 
-        seen_ids.add(candidate.movie_id)
+        seen_ids.add(resolved_movie_id)
         reasons = self._build_es_relation_reasons(
             source_genres=source_genres,
             source_cast=source_cast,
@@ -538,36 +748,28 @@ class RelatedMovieService:
             source_collection=source_collection,
             candidate=candidate,
         )
-
-        poster_url = None
-        if candidate.poster_path:
-            poster_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{candidate.poster_path}"
+        relation_candidate = RelatedCandidate(
+            score=round(
+                self._calculate_es_relation_score(
+                    source_genres=source_genres,
+                    source_cast=source_cast,
+                    source_director=source_director,
+                    source_collection=source_collection,
+                    candidate=candidate,
+                ),
+                4,
+            ),
+            reasons=reasons[:3],
+            sources=relation_sources,
+        )
+        if isinstance(display_movie, MovieDTO):
+            related_items.append(
+                self._to_related_movie_item(movie=display_movie, candidate=relation_candidate)
+            )
+            return
 
         related_items.append(
-            RelatedMovieItem(
-                movie_id=candidate.movie_id,
-                title=candidate.title,
-                title_en=candidate.title_en,
-                genres=candidate.genres,
-                release_year=candidate.release_year,
-                rating=candidate.rating,
-                vote_count=candidate.vote_count,
-                poster_url=poster_url,
-                trailer_url=candidate.trailer_url,
-                overview=candidate.overview,
-                relation_score=round(
-                    self._calculate_es_relation_score(
-                        source_genres=source_genres,
-                        source_cast=source_cast,
-                        source_director=source_director,
-                        source_collection=source_collection,
-                        candidate=candidate,
-                    ),
-                    4,
-                ),
-                relation_reasons=reasons[:3],
-                relation_sources=relation_sources,
-            )
+            self._to_related_movie_item_from_es(movie=display_movie, candidate=relation_candidate)
         )
 
     def _sort_collection_movies(
@@ -954,14 +1156,17 @@ class RelatedMovieService:
         candidate_map: dict[str, RelatedCandidate],
         candidate_movies: list[MovieDTO],
         limit: int,
+        title_lookup: dict[str, list[MovieDTO]] | None = None,
     ) -> list[RelatedMovieItem]:
         """컬렉션을 제외한 Qdrant 벡터 우선 기준의 연관 영화 응답을 구성합니다."""
+        resolved_title_lookup = title_lookup or {}
         external_id_to_movie: dict[str, MovieDTO] = {}
         for movie in candidate_movies:
-            if not self._has_movie_poster(movie):
+            display_movie = self._resolve_display_movie_dto(movie, resolved_title_lookup)
+            if display_movie is None:
                 continue
             for identifier in self._build_movie_identifiers(movie):
-                external_id_to_movie[identifier] = movie
+                external_id_to_movie[identifier] = display_movie
 
         by_canonical_id: dict[str, tuple[MovieDTO, RelatedCandidate]] = {}
         source_identifiers = set(self._build_movie_identifiers(source_movie))
@@ -1015,10 +1220,14 @@ class RelatedMovieService:
                     merged_candidate.sources.append(source)
             by_canonical_id[movie.movie_id] = (merged_movie, merged_candidate)
 
-        collection_movies_with_poster = [
-            movie for movie in collection_movies if self._has_movie_poster(movie)
-        ]
-        collection_movie_ids = {movie.movie_id for movie in collection_movies_with_poster}
+        collection_movie_ids = {
+            display_movie.movie_id
+            for display_movie in (
+                self._resolve_display_movie_dto(movie, resolved_title_lookup)
+                for movie in collection_movies
+            )
+            if display_movie is not None
+        }
         desired_total = limit
         related_items: list[RelatedMovieItem] = []
         seen_ids: set[str] = set(collection_movie_ids)
@@ -1041,8 +1250,6 @@ class RelatedMovieService:
                 break
             if movie.movie_id in seen_ids:
                 continue
-            if not self._has_movie_poster(movie):
-                continue
             related_items.append(self._to_related_movie_item(movie=movie, candidate=candidate))
             seen_ids.add(movie.movie_id)
 
@@ -1050,11 +1257,11 @@ class RelatedMovieService:
 
     def _has_movie_poster(self, movie: MovieDTO) -> bool:
         """MySQL 영화 DTO가 유효한 포스터 경로를 갖는지 확인합니다."""
-        return bool((movie.poster_path or "").strip())
+        return is_valid_internal_poster_path(movie.poster_path)
 
     def _has_es_poster(self, movie: ESSearchMovieItem) -> bool:
         """ES 검색 결과가 유효한 포스터 경로를 갖는지 확인합니다."""
-        return bool((movie.poster_path or "").strip())
+        return is_valid_internal_poster_path(movie.poster_path)
 
     def _to_related_movie_item(
         self,
@@ -1063,9 +1270,7 @@ class RelatedMovieService:
         candidate: RelatedCandidate,
     ) -> RelatedMovieItem:
         """MovieDTO를 연관 영화 응답 모델로 변환합니다."""
-        poster_url = None
-        if movie.poster_path:
-            poster_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{movie.poster_path}"
+        poster_url = build_tmdb_poster_url(self._settings.TMDB_IMAGE_BASE_URL, movie.poster_path)
 
         return RelatedMovieItem(
             movie_id=movie.movie_id,
@@ -1082,6 +1287,82 @@ class RelatedMovieService:
             relation_reasons=self._prioritize_relation_reasons(candidate.reasons)[:3],
             relation_sources=candidate.sources,
         )
+
+    def _to_related_movie_item_from_es(
+        self,
+        *,
+        movie: ESSearchMovieItem,
+        candidate: RelatedCandidate,
+    ) -> RelatedMovieItem:
+        """ES 검색 결과를 연관 영화 응답 모델로 변환합니다."""
+        poster_url = build_tmdb_poster_url(self._settings.TMDB_IMAGE_BASE_URL, movie.poster_path)
+        return RelatedMovieItem(
+            movie_id=movie.movie_id,
+            title=movie.title,
+            title_en=movie.title_en,
+            genres=movie.genres,
+            release_year=movie.release_year,
+            rating=movie.rating,
+            vote_count=movie.vote_count,
+            poster_url=poster_url,
+            trailer_url=movie.trailer_url,
+            overview=movie.overview,
+            relation_score=round(candidate.score, 4),
+            relation_reasons=self._prioritize_relation_reasons(candidate.reasons)[:3],
+            relation_sources=candidate.sources,
+        )
+
+    def _resolve_display_movie_dto(
+        self,
+        movie: MovieDTO,
+        title_lookup: dict[str, list[MovieDTO]],
+    ) -> MovieDTO | None:
+        """DB 영화의 포스터가 무효면 제목 exact match 후보로 대체합니다."""
+        if self._has_movie_poster(movie):
+            return movie
+        return self._select_title_fallback_movie(
+            title=movie.title,
+            title_en=movie.title_en,
+            title_lookup=title_lookup,
+            exclude_movie_id=movie.movie_id,
+        )
+
+    def _resolve_display_movie_from_es(
+        self,
+        movie: ESSearchMovieItem,
+        title_lookup: dict[str, list[MovieDTO]],
+    ) -> ESSearchMovieItem | MovieDTO | None:
+        """ES 영화의 포스터가 무효면 제목 exact match 후보로 대체합니다."""
+        if self._has_es_poster(movie):
+            return movie
+        return self._select_title_fallback_movie(
+            title=movie.title,
+            title_en=movie.title_en,
+            title_lookup=title_lookup,
+        )
+
+    @staticmethod
+    def _select_title_fallback_movie(
+        *,
+        title: str | None,
+        title_en: str | None,
+        title_lookup: dict[str, list[MovieDTO]],
+        exclude_movie_id: str | None = None,
+    ) -> MovieDTO | None:
+        """제목 exact match 후보 중 첫 번째 유효 포스터 영화를 선택합니다."""
+        for candidate_title in collect_exact_title_candidates(title, title_en):
+            for candidate in title_lookup.get(candidate_title, []):
+                if exclude_movie_id and candidate.movie_id == exclude_movie_id:
+                    continue
+                if is_valid_internal_poster_path(candidate.poster_path):
+                    return candidate
+        return None
+
+    @staticmethod
+    def _resolved_movie_id(movie: ESSearchMovieItem | MovieDTO | None) -> str | None:
+        """대체 후 표시할 영화의 ID를 반환합니다."""
+        movie_id = str(getattr(movie, "movie_id", "") or "").strip()
+        return movie_id or None
 
     def _sort_collection_movie_dtos(
         self,
