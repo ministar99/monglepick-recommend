@@ -31,6 +31,7 @@ class MovieDTO(BaseModel):
     poster_path: Optional[str] = None
     backdrop_path: Optional[str] = None
     release_year: Optional[int] = None
+    release_date: Optional[date | datetime | str] = None
     runtime: Optional[int] = None
     rating: Optional[float] = None
     vote_count: Optional[int] = None

@@ -758,6 +758,33 @@ async def test_movie_detail_normalizes_date_typed_kobis_open_dt(async_session: A
     assert detail.release_date == "2026-04-13"
 
 
+@pytest.mark.asyncio
+async def test_movie_detail_prefers_release_date_column_without_fake_january_first(
+    async_session: AsyncSession,
+):
+    """상세 응답은 release_date 컬럼이 있으면 그 값을 우선 사용하고, 없으면 1월 1일을 합성하지 않습니다."""
+    service = SearchService(async_session)
+    dated_movie = Movie(
+        movie_id="712",
+        title="실제 개봉일 영화",
+        title_en="Real Release Date Movie",
+        release_year=2026,
+        release_date=date(2026, 4, 30),
+    )
+    year_only_movie = Movie(
+        movie_id="713",
+        title="연도만 있는 영화",
+        title_en="Year Only Movie",
+        release_year=2026,
+    )
+
+    dated_detail = service._to_movie_detail(dated_movie)
+    year_only_detail = service._to_movie_detail(year_only_movie)
+
+    assert dated_detail.release_date == "2026-04-30"
+    assert year_only_detail.release_date is None
+
+
 def test_search_history_primary_key_column_matches_backend_schema():
     """검색 이력 ORM은 backend 실DB 컬럼명 search_history_id를 사용해야 합니다."""
     primary_keys = list(SearchHistory.__table__.primary_key.columns)
