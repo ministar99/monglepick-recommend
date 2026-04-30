@@ -137,6 +137,29 @@ class MovieSearchResponse(BaseModel):
     )
 
 
+class PersonalizedMoviePick(BaseModel):
+    """검색 초기 화면용 개인화 추천 영화 항목"""
+    movie_id: str = Field(description="영화 ID")
+    title: str = Field(description="한국어 제목")
+    title_en: str | None = Field(default=None, description="영어 원제")
+    genres: list[str] = Field(default_factory=list, description="장르 목록")
+    release_year: int | None = Field(default=None, description="개봉 연도")
+    rating: float | None = Field(default=None, description="평균 평점")
+    vote_count: int | None = Field(default=None, description="평점 참여 수")
+    poster_url: str | None = Field(default=None, description="포스터 이미지 전체 URL")
+    trailer_url: str | None = Field(default=None, description="예고편 URL")
+    overview: str | None = Field(default=None, description="줄거리 요약")
+    personalized_score: float = Field(default=0.0, description="개인화 랭킹 점수")
+    personalized_reasons: list[str] = Field(default_factory=list, description="추천 이유 목록")
+    personalized_sources: list[str] = Field(default_factory=list, description="후보 생성 소스 목록")
+
+
+class PersonalizedTopPicksResponse(BaseModel):
+    """검색 초기 화면용 개인화 추천 TOP picks 응답"""
+    movies: list[PersonalizedMoviePick] = Field(default_factory=list, description="개인화 추천 영화 목록")
+    total_candidates: int = Field(default=0, description="랭킹 전 후보 수")
+
+
 class AutocompleteResponse(BaseModel):
     """
     자동완성 응답

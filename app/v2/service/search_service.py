@@ -35,6 +35,11 @@ from app.v2.model.dto import MovieDTO
 from app.v2.repository.movie_repository import MovieRepository
 from app.v2.repository.search_history_repository import SearchHistoryRepository
 from app.v2.repository.trending_repository import TrendingRepository
+from app.v2.service.poster_policy import (
+    build_tmdb_poster_url,
+    collect_exact_title_candidates,
+    is_valid_internal_poster_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +51,7 @@ class MovieDetailNotFoundError(LookupError):
 class SearchService:
     """영화 검색 비즈니스 로직 서비스 (v2 Raw SQL)"""
 
-    HOME_BOX_OFFICE_CACHE_KEY_PREFIX = "home_box_office:v2:"
+    HOME_BOX_OFFICE_CACHE_KEY_PREFIX = "home_box_office:v3:"
 
     def __init__(self, conn: aiomysql.Connection, redis_client: aioredis.Redis | None = None):
         """
@@ -206,11 +211,12 @@ class SearchService:
                     logger.warning(f"MySQL 인기 검색어 저장 실패: {e}")
 
         # 응답 변환
-        movie_briefs = (
-            [self._to_movie_brief(m) for m in movies]
-            if es_movies is None
-            else [self._to_movie_brief_from_es(m) for m in es_movies]
-        )
+        if es_movies is None:
+            title_lookup = await self._build_search_title_lookup(dto_movies=movies)
+            movie_briefs = self._build_movie_briefs_from_dtos(movies, title_lookup=title_lookup)
+        else:
+            title_lookup = await self._build_search_title_lookup(es_movies=es_movies)
+            movie_briefs = self._build_movie_briefs_from_es_movies(es_movies, title_lookup=title_lookup)
         total_pages = ceil(total / size) if total > 0 else 0
 
         return MovieSearchResponse(
@@ -412,11 +418,137 @@ class SearchService:
             "size": size,
         }
 
+    async def _build_search_title_lookup(
+        self,
+        *,
+        dto_movies: list[MovieDTO] | None = None,
+        es_movies: list[ESSearchMovieItem] | None = None,
+    ) -> dict[str, list[MovieDTO]]:
+        """포스터 대체용 제목 exact match 후보 lookup을 구성합니다."""
+        titles: list[str] = []
+        for movie in dto_movies or []:
+            if self._has_valid_movie_poster(movie):
+                continue
+            titles.extend(collect_exact_title_candidates(movie.title, movie.title_en))
+        for movie in es_movies or []:
+            if self._has_valid_es_poster(movie):
+                continue
+            titles.extend(collect_exact_title_candidates(movie.title, movie.title_en))
+
+        candidates = await self._movie_repo.find_with_posters_by_titles(titles)
+        lookup: dict[str, dict[str, MovieDTO]] = {}
+        for candidate in candidates:
+            for title in collect_exact_title_candidates(candidate.title, candidate.title_en):
+                bucket = lookup.setdefault(title, {})
+                bucket[candidate.movie_id] = candidate
+        return {
+            title: list(bucket.values())
+            for title, bucket in lookup.items()
+        }
+
+    def _build_movie_briefs_from_dtos(
+        self,
+        movies: list[MovieDTO],
+        *,
+        title_lookup: dict[str, list[MovieDTO]] | None = None,
+    ) -> list[MovieBrief]:
+        """DB 검색 결과를 포스터 보정 후 MovieBrief 목록으로 변환합니다."""
+        movie_briefs: list[MovieBrief] = []
+        seen_movie_ids: set[str] = set()
+        for movie in movies:
+            display_movie = self._resolve_display_movie_dto(movie, title_lookup or {})
+            if display_movie is None or display_movie.movie_id in seen_movie_ids:
+                continue
+            seen_movie_ids.add(display_movie.movie_id)
+            movie_briefs.append(self._to_movie_brief(display_movie))
+        return movie_briefs
+
+    def _build_movie_briefs_from_es_movies(
+        self,
+        movies: list[ESSearchMovieItem],
+        *,
+        title_lookup: dict[str, list[MovieDTO]] | None = None,
+    ) -> list[MovieBrief]:
+        """ES 검색 결과를 포스터 보정 후 MovieBrief 목록으로 변환합니다."""
+        movie_briefs: list[MovieBrief] = []
+        seen_movie_ids: set[str] = set()
+        for movie in movies:
+            display_movie = self._resolve_display_movie_from_es(movie, title_lookup or {})
+            if display_movie is None:
+                continue
+
+            if isinstance(display_movie, MovieDTO):
+                if display_movie.movie_id in seen_movie_ids:
+                    continue
+                seen_movie_ids.add(display_movie.movie_id)
+                movie_briefs.append(self._to_movie_brief(display_movie))
+                continue
+
+            if display_movie.movie_id in seen_movie_ids:
+                continue
+            seen_movie_ids.add(display_movie.movie_id)
+            movie_briefs.append(self._to_movie_brief_from_es(display_movie))
+        return movie_briefs
+
+    def _resolve_display_movie_dto(
+        self,
+        movie: MovieDTO,
+        title_lookup: dict[str, list[MovieDTO]],
+    ) -> MovieDTO | None:
+        """DB 영화의 포스터가 무효면 제목 exact match 후보로 대체합니다."""
+        if self._has_valid_movie_poster(movie):
+            return movie
+        return self._select_title_fallback_movie(
+            title=movie.title,
+            title_en=movie.title_en,
+            title_lookup=title_lookup,
+            exclude_movie_id=movie.movie_id,
+        )
+
+    def _resolve_display_movie_from_es(
+        self,
+        movie: ESSearchMovieItem,
+        title_lookup: dict[str, list[MovieDTO]],
+    ) -> ESSearchMovieItem | MovieDTO | None:
+        """ES 영화의 포스터가 무효면 제목 exact match 후보로 대체합니다."""
+        if self._has_valid_es_poster(movie):
+            return movie
+        return self._select_title_fallback_movie(
+            title=movie.title,
+            title_en=movie.title_en,
+            title_lookup=title_lookup,
+        )
+
+    @staticmethod
+    def _select_title_fallback_movie(
+        *,
+        title: str | None,
+        title_en: str | None,
+        title_lookup: dict[str, list[MovieDTO]],
+        exclude_movie_id: str | None = None,
+    ) -> MovieDTO | None:
+        """제목 exact match 후보 중 첫 번째 유효 포스터 영화를 선택합니다."""
+        for candidate_title in collect_exact_title_candidates(title, title_en):
+            for candidate in title_lookup.get(candidate_title, []):
+                if exclude_movie_id and candidate.movie_id == exclude_movie_id:
+                    continue
+                if is_valid_internal_poster_path(candidate.poster_path):
+                    return candidate
+        return None
+
+    @staticmethod
+    def _has_valid_movie_poster(movie: MovieDTO) -> bool:
+        """DB 영화의 poster_path가 유효한지 확인합니다."""
+        return is_valid_internal_poster_path(movie.poster_path)
+
+    @staticmethod
+    def _has_valid_es_poster(movie: ESSearchMovieItem) -> bool:
+        """ES 영화의 poster_path가 유효한지 확인합니다."""
+        return is_valid_internal_poster_path(movie.poster_path)
+
     def _to_movie_brief(self, movie: MovieDTO) -> MovieBrief:
         """MovieDTO를 MovieBrief 스키마로 변환합니다."""
-        poster_url = None
-        if movie.poster_path:
-            poster_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{movie.poster_path}"
+        poster_url = build_tmdb_poster_url(self._settings.TMDB_IMAGE_BASE_URL, movie.poster_path)
 
         return MovieBrief(
             movie_id=movie.movie_id,
@@ -433,9 +565,7 @@ class SearchService:
 
     def _to_movie_brief_from_es(self, movie: ESSearchMovieItem) -> MovieBrief:
         """ES 검색 결과 문서를 기존 검색 응답 스키마에 맞춰 정규화합니다."""
-        poster_url = None
-        if movie.poster_path:
-            poster_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{movie.poster_path}"
+        poster_url = build_tmdb_poster_url(self._settings.TMDB_IMAGE_BASE_URL, movie.poster_path)
 
         return MovieBrief(
             movie_id=movie.movie_id,
@@ -452,22 +582,16 @@ class SearchService:
 
     def _to_movie_detail(self, movie: MovieDTO) -> MovieDetailResponse:
         """MovieDTO를 MovieDetailResponse로 변환합니다."""
-        poster_url = None
-        if movie.poster_path:
-            poster_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{movie.poster_path}"
+        poster_url = build_tmdb_poster_url(self._settings.TMDB_IMAGE_BASE_URL, movie.poster_path)
 
         backdrop_url = None
         if movie.backdrop_path:
             backdrop_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{movie.backdrop_path}"
 
         kobis_open_dt = self._normalize_kobis_open_dt(movie.kobis_open_dt)
-        release_date = None
-        if kobis_open_dt and len(kobis_open_dt) == 8 and kobis_open_dt.isdigit():
-            release_date = (
-                f"{kobis_open_dt[:4]}-{kobis_open_dt[4:6]}-{kobis_open_dt[6:8]}"
-            )
-        elif movie.release_year:
-            release_date = f"{movie.release_year}-01-01"
+        release_date = self._normalize_release_date(movie.release_date)
+        if release_date is None and kobis_open_dt and len(kobis_open_dt) == 8 and kobis_open_dt.isdigit():
+            release_date = f"{kobis_open_dt[:4]}-{kobis_open_dt[4:6]}-{kobis_open_dt[6:8]}"
 
         return MovieDetailResponse(
             movie_id=movie.movie_id,
@@ -508,6 +632,24 @@ class SearchService:
             return value.strftime("%Y%m%d")
         if isinstance(value, str):
             return value.strip() or None
+        return str(value)
+
+    @staticmethod
+    def _normalize_release_date(value: object) -> str | None:
+        """release_date 컬럼 값을 YYYY-MM-DD 문자열로 정규화합니다."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, str):
+            trimmed = value.strip()
+            if not trimmed:
+                return None
+            if len(trimmed) == 8 and trimmed.isdigit():
+                return f"{trimmed[:4]}-{trimmed[4:6]}-{trimmed[6:8]}"
+            return trimmed
         return str(value)
 
     @classmethod
@@ -623,7 +765,7 @@ class SearchService:
         )
 
         # 강한 식별자 매칭으로도 포스터가 없으면 제목 exact match 후보를 2차 fallback으로 사용한다.
-        if not best_movie.poster_path:
+        if not self._has_valid_movie_poster(best_movie):
             title_candidates = self._collect_candidates_by_titles(
                 source_movie.title,
                 source_movie.title_en,
@@ -668,10 +810,7 @@ class SearchService:
     ) -> list[MovieDTO]:
         """제목 lookup에서 후보 영화를 dedupe하여 반환합니다."""
         merged: dict[str, MovieDTO] = {}
-        for raw_title in (title, title_en):
-            normalized_title = raw_title.strip() if raw_title and raw_title.strip() else None
-            if not normalized_title:
-                continue
+        for normalized_title in collect_exact_title_candidates(title, title_en):
             for candidate in title_lookup.get(normalized_title, []):
                 merged[candidate.movie_id] = candidate
         return list(merged.values())
@@ -692,12 +831,11 @@ class SearchService:
 
         return list(dict.fromkeys([identifier.strip() for identifier in identifiers if identifier and identifier.strip()]))
 
-    @staticmethod
-    def _home_box_office_display_score(movie: MovieDTO) -> int:
+    def _home_box_office_display_score(self, movie: MovieDTO) -> int:
         """홈 카드/상세 진입 품질 기준의 메타데이터 점수를 계산합니다."""
         score = 0
 
-        if movie.poster_path:
+        if self._has_valid_movie_poster(movie):
             score += 100
         if movie.overview and movie.overview.strip():
             score += 40

@@ -495,13 +495,9 @@ class SearchService:
             backdrop_url = f"{self._settings.TMDB_IMAGE_BASE_URL}{movie.backdrop_path}"
 
         kobis_open_dt = self._normalize_kobis_open_dt(movie.kobis_open_dt)
-        release_date = None
-        if kobis_open_dt and len(kobis_open_dt) == 8 and kobis_open_dt.isdigit():
-            release_date = (
-                f"{kobis_open_dt[:4]}-{kobis_open_dt[4:6]}-{kobis_open_dt[6:8]}"
-            )
-        elif movie.release_year:
-            release_date = f"{movie.release_year}-01-01"
+        release_date = self._normalize_release_date(movie.release_date)
+        if release_date is None and kobis_open_dt and len(kobis_open_dt) == 8 and kobis_open_dt.isdigit():
+            release_date = f"{kobis_open_dt[:4]}-{kobis_open_dt[4:6]}-{kobis_open_dt[6:8]}"
 
         return MovieDetailResponse(
             movie_id=movie.movie_id,
@@ -542,4 +538,22 @@ class SearchService:
             return value.strftime("%Y%m%d")
         if isinstance(value, str):
             return value.strip() or None
+        return str(value)
+
+    @staticmethod
+    def _normalize_release_date(value: object) -> str | None:
+        """release_date 컬럼 값을 YYYY-MM-DD 문자열로 정규화합니다."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, str):
+            trimmed = value.strip()
+            if not trimmed:
+                return None
+            if len(trimmed) == 8 and trimmed.isdigit():
+                return f"{trimmed[:4]}-{trimmed[4:6]}-{trimmed[6:8]}"
+            return trimmed
         return str(value)

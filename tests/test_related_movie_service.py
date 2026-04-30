@@ -216,6 +216,54 @@ def test_build_es_related_movie_items_excludes_same_collection_by_name_without_c
     assert [item.movie_id for item in related_items] == ["4"]
 
 
+def test_build_es_related_movie_items_replaces_external_poster_with_title_fallback():
+    service = RelatedMovieService(conn=None)
+    source_movie = MovieDTO(
+        movie_id="1",
+        title="기생충",
+        genres=["드라마", "스릴러"],
+    )
+    external_poster_candidate = ESSearchMovieItem(
+        movie_id="2",
+        title="올드보이",
+        title_en=None,
+        genres=["스릴러", "드라마"],
+        release_year=2003,
+        rating=8.3,
+        vote_count=1800,
+        poster_path="http://file.koreafilm.or.kr/thm/02/99/17/97/tn_DPF026925.jpg",
+        trailer_url=None,
+        overview="복수극을 그린 작품",
+        director="박찬욱",
+        cast=["최민식"],
+        collection_name=None,
+        score=8.7,
+    )
+    title_matched_movie = MovieDTO(
+        movie_id="22",
+        title="올드보이",
+        genres=["스릴러", "드라마"],
+        release_year=2003,
+        rating=8.4,
+        vote_count=2500,
+        poster_path="/oldboy.jpg",
+        overview="포스터가 있는 동일 제목 영화",
+    )
+
+    related_items = service._build_es_related_movie_items(
+        source_movie=source_movie,
+        collection_movies=[],
+        candidate_movies=[external_poster_candidate],
+        limit=5,
+        include_collection_movies=False,
+        title_lookup={"올드보이": [title_matched_movie]},
+    )
+
+    assert [item.movie_id for item in related_items] == ["22"]
+    assert related_items[0].poster_url == f"{service._settings.TMDB_IMAGE_BASE_URL}/oldboy.jpg"
+    assert related_items[0].relation_sources == ["elasticsearch_related"]
+
+
 def test_sort_general_es_candidates_prefers_genre_similarity_over_director_only_match():
     service = RelatedMovieService(conn=None)
     source_movie = MovieDTO(
@@ -453,6 +501,55 @@ def test_build_related_movie_items_excludes_movies_without_poster():
     )
 
     assert [item.movie_id for item in related_items] == ["4"]
+
+
+def test_build_related_movie_items_replaces_movies_without_valid_poster_using_title_lookup():
+    service = RelatedMovieService(conn=None)
+    source_movie = MovieDTO(
+        movie_id="1",
+        title="기생충",
+        genres=["드라마", "스릴러"],
+    )
+    candidate_without_valid_poster = MovieDTO(
+        movie_id="3",
+        title="올드보이",
+        genres=["스릴러"],
+        release_year=2003,
+        rating=8.3,
+        vote_count=1800,
+        poster_path="http://file.koreafilm.or.kr/thm/02/99/17/97/tn_DPF026925.jpg",
+        overview="복수극을 그린 작품",
+    )
+    title_matched_movie = MovieDTO(
+        movie_id="33",
+        title="올드보이",
+        genres=["스릴러"],
+        release_year=2003,
+        rating=8.4,
+        vote_count=2500,
+        poster_path="/oldboy.jpg",
+        overview="포스터가 있는 동일 제목 영화",
+    )
+
+    related_items = service._build_related_movie_items(
+        source_movie=source_movie,
+        collection_movies=[],
+        candidate_map={
+            "3": RelatedCandidate(
+                score=130.0,
+                qdrant_vector_similarity=0.93,
+                qdrant_vector_rank=0,
+                reasons=["비슷한 줄거리"],
+                sources=["qdrant_plot_vector"],
+            ),
+        },
+        candidate_movies=[candidate_without_valid_poster],
+        limit=3,
+        title_lookup={"올드보이": [title_matched_movie]},
+    )
+
+    assert [item.movie_id for item in related_items] == ["33"]
+    assert related_items[0].poster_url == f"{service._settings.TMDB_IMAGE_BASE_URL}/oldboy.jpg"
 
 
 def test_build_related_movie_items_excludes_collection_movies_from_general_related():
