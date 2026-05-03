@@ -157,6 +157,30 @@ class TrendingKeywordDTO(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PopularSearchKeywordDTO(BaseModel):
+    """
+    관리자 인기 검색어 오버레이 DTO
+
+    popular_search_keyword 테이블의 DictCursor 결과를 매핑합니다.
+    """
+    id: int
+    keyword: str
+    display_rank: int | None = None
+    manual_priority: int = 0
+    is_excluded: bool = False
+    admin_note: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("is_excluded", mode="before")
+    @classmethod
+    def _normalize_mysql_bit_flags(cls, value: Any) -> Any:
+        """MySQL BIT(1) 컬럼이 bytes로 들어오는 경우를 bool로 정규화합니다."""
+        return _parse_mysql_bool(value)
+
+
 class LikeDTO(BaseModel):
     """
     영화 좋아요 DTO (Raw SQL 결과 매핑).
