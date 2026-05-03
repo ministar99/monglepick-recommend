@@ -23,7 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.model.schema import TrendingKeywordItem, TrendingResponse
+from app.repository.popular_search_repository import PopularSearchRepository
 from app.repository.trending_repository import TrendingRepository
+from app.service.popular_search_overlay import (
+    PopularSearchOverlayMeta,
+    TrendingOverlayCandidate,
+    build_popular_search_ranking,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,7 @@ class TrendingService:
         self._redis = redis_client
         self._settings = get_settings()
         self._trending_repo = TrendingRepository(session)
+        self._popular_search_repo = PopularSearchRepository(session)
 
     async def get_trending(self) -> TrendingResponse:
         """
@@ -56,47 +63,77 @@ class TrendingService:
             TrendingResponse: 인기 검색어 목록 (순위, 키워드, 검색 횟수)
         """
         top_k = self._settings.TRENDING_TOP_K
+        candidate_limit = max(top_k * 5, 50)
 
-        # ─────────────────────────────────────
-        # 1차: Redis Sorted Set 조회
-        # ─────────────────────────────────────
+        trending_candidates = await self._load_trending_candidates(candidate_limit)
+        overlay_keywords = await self._popular_search_repo.get_all_keywords()
+        ranked_keywords = build_popular_search_ranking(
+            trending_candidates=[
+                TrendingOverlayCandidate(
+                    keyword=item.keyword,
+                    search_count=item.search_count,
+                    base_rank=index,
+                )
+                for index, item in enumerate(trending_candidates, start=1)
+            ],
+            overlay_keywords=[
+                PopularSearchOverlayMeta(
+                    keyword=item.keyword,
+                    display_rank=item.display_rank,
+                    manual_priority=item.manual_priority,
+                    is_excluded=item.is_excluded,
+                )
+                for item in overlay_keywords
+            ],
+            limit=top_k,
+        )
+        return TrendingResponse(
+            keywords=[
+                TrendingKeywordItem(
+                    rank=index,
+                    keyword=item.keyword,
+                    search_count=item.search_count,
+                )
+                for index, item in enumerate(ranked_keywords, start=1)
+            ]
+        )
+
+    async def _load_trending_candidates(self, limit: int):
+        """
+        인기 검색어 기본 후보를 조회합니다.
+
+        오버레이 적용 시 제외 키워드나 수동 삽입 키워드 때문에 순위 재배치가 일어나므로
+        최종 노출 수보다 더 넉넉한 후보를 읽습니다.
+        """
         try:
-            # ZREVRANGE: score 내림차순으로 상위 K개 조회 (withscores=True)
             results = await self._redis.zrevrange(
                 TRENDING_REDIS_KEY,
                 0,
-                top_k - 1,
+                limit - 1,
                 withscores=True,
             )
 
             if results:
-                items = []
-                for rank, (keyword, score) in enumerate(results, start=1):
-                    items.append(
-                        TrendingKeywordItem(
-                            rank=rank,
-                            keyword=keyword,
-                            search_count=int(score),
-                        )
+                return [
+                    TrendingOverlayCandidate(
+                        keyword=keyword,
+                        search_count=int(score),
+                        base_rank=rank,
                     )
-                return TrendingResponse(keywords=items)
-
+                    for rank, (keyword, score) in enumerate(results, start=1)
+                ]
         except Exception as e:
             logger.warning(f"Redis 인기 검색어 조회 실패, MySQL 폴백: {e}")
 
-        # ─────────────────────────────────────
-        # 2차: MySQL 폴백 (Redis 장애 또는 데이터 없음)
-        # ─────────────────────────────────────
-        db_keywords = await self._trending_repo.get_top_keywords(limit=top_k)
-        items = [
-            TrendingKeywordItem(
-                rank=rank,
+        db_keywords = await self._trending_repo.get_top_keywords(limit=limit)
+        return [
+            TrendingOverlayCandidate(
                 keyword=kw.keyword,
                 search_count=kw.search_count,
+                base_rank=rank,
             )
             for rank, kw in enumerate(db_keywords, start=1)
         ]
-        return TrendingResponse(keywords=items)
 
     async def record_search(self, keyword: str) -> None:
         """

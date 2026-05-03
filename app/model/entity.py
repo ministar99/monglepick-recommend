@@ -291,6 +291,33 @@ class TrendingKeyword(Base):
     )
 
 
+class PopularSearchKeyword(Base):
+    """
+    관리자 인기 검색어 오버레이 엔티티
+
+    Backend JPA가 관리하는 popular_search_keyword 테이블을 읽기 전용으로 매핑합니다.
+    사용자 노출용 인기 검색어를 조합할 때 display_rank/manual_priority/is_excluded를
+    함께 참고합니다.
+    """
+    __tablename__ = "popular_search_keyword"
+    __table_args__ = (
+        Index("idx_psk_excluded", "is_excluded"),
+        Index("idx_psk_priority", "manual_priority"),
+        {"extend_existing": True},
+    )
+
+    id: int = Column(AutoIncrementBigInt, primary_key=True, autoincrement=True)
+    keyword: str = Column(String(200), nullable=False, unique=True, comment="검색 키워드")
+    display_rank: int | None = Column(Integer, nullable=True, comment="고정 노출 순위")
+    manual_priority: int = Column(Integer, nullable=False, default=0, comment="수동 우선순위")
+    is_excluded: bool = Column(Boolean, nullable=False, default=False, comment="노출 제외 여부")
+    admin_note: str | None = Column(Text, nullable=True, comment="관리자 메모")
+    created_at: datetime | None = Column(DateTime, nullable=True, comment="생성 시각")
+    updated_at: datetime | None = Column(DateTime, nullable=True, comment="수정 시각")
+    created_by: str | None = Column(String(50), nullable=True, comment="생성자")
+    updated_by: str | None = Column(String(50), nullable=True, comment="수정자")
+
+
 class WorldcupResult(Base):
     """
     이상형 월드컵 결과 엔티티
