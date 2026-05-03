@@ -20,6 +20,12 @@ from app.model.schema import (
     TrendingKeywordItem,
     TrendingResponse,
 )
+from app.service.popular_search_overlay import (
+    PopularSearchOverlayMeta,
+    TrendingOverlayCandidate,
+    build_popular_search_ranking,
+)
+from app.v2.repository.popular_search_repository import PopularSearchRepository
 from app.v2.repository.search_history_repository import SearchHistoryRepository
 from app.v2.repository.trending_repository import TrendingRepository
 
@@ -43,6 +49,7 @@ class TrendingService:
         self._settings = get_settings()
         self._trending_repo = TrendingRepository(conn)
         self._history_repo = SearchHistoryRepository(conn)
+        self._popular_search_repo = PopularSearchRepository(conn)
 
     async def get_trending(self) -> TrendingResponse:
         """
@@ -52,42 +59,66 @@ class TrendingService:
         2차 (Redis 장애 시): MySQL trending_keywords 테이블에서 조회
         """
         top_k = self._settings.TRENDING_TOP_K
+        candidate_limit = max(top_k * 5, 50)
 
-        # 1차: Redis Sorted Set 조회
+        trending_candidates = await self._load_trending_candidates(candidate_limit)
+        overlay_keywords = await self._popular_search_repo.get_all_keywords()
+        ranked_keywords = build_popular_search_ranking(
+            trending_candidates=trending_candidates,
+            overlay_keywords=[
+                PopularSearchOverlayMeta(
+                    keyword=item.keyword,
+                    display_rank=item.display_rank,
+                    manual_priority=item.manual_priority,
+                    is_excluded=item.is_excluded,
+                )
+                for item in overlay_keywords
+            ],
+            limit=top_k,
+        )
+
+        return TrendingResponse(
+            keywords=[
+                TrendingKeywordItem(
+                    rank=index,
+                    keyword=item.keyword,
+                    search_count=item.search_count,
+                )
+                for index, item in enumerate(ranked_keywords, start=1)
+            ]
+        )
+
+    async def _load_trending_candidates(self, limit: int) -> list[TrendingOverlayCandidate]:
+        """오버레이 전 기본 인기 검색어 후보를 충분히 넉넉하게 읽어옵니다."""
         try:
             results = await self._redis.zrevrange(
                 TRENDING_REDIS_KEY,
                 0,
-                top_k - 1,
+                limit - 1,
                 withscores=True,
             )
 
             if results:
-                items = []
-                for rank, (keyword, score) in enumerate(results, start=1):
-                    items.append(
-                        TrendingKeywordItem(
-                            rank=rank,
-                            keyword=keyword,
-                            search_count=int(score),
-                        )
+                return [
+                    TrendingOverlayCandidate(
+                        keyword=keyword,
+                        search_count=int(score),
+                        base_rank=rank,
                     )
-                return TrendingResponse(keywords=items)
-
+                    for rank, (keyword, score) in enumerate(results, start=1)
+                ]
         except Exception as e:
             logger.warning(f"Redis 인기 검색어 조회 실패, MySQL 폴백: {e}")
 
-        # 2차: MySQL 폴백
-        db_keywords = await self._trending_repo.get_top_keywords(limit=top_k)
-        items = [
-            TrendingKeywordItem(
-                rank=rank,
+        db_keywords = await self._trending_repo.get_top_keywords(limit=limit)
+        return [
+            TrendingOverlayCandidate(
                 keyword=kw.keyword,
                 search_count=kw.search_count,
+                base_rank=rank,
             )
             for rank, kw in enumerate(db_keywords, start=1)
         ]
-        return TrendingResponse(keywords=items)
 
     async def record_search(self, keyword: str) -> None:
         """

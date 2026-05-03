@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.model.entity import Movie, SearchHistory, TrendingKeyword
+from app.model.entity import Movie, PopularSearchKeyword, SearchHistory, TrendingKeyword
 from app.repository.trending_repository import TrendingRepository
 from app.search_elasticsearch import ESSearchMovieItem, ESSearchMoviesResult
 from app.service.search_service import SearchService
@@ -664,6 +664,55 @@ async def test_trending_after_search(client: AsyncClient, async_session: AsyncSe
     # "인터스텔라"가 1위여야 함
     assert keywords[0]["keyword"] == "인터스텔라"
     assert keywords[0]["search_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_trending_applies_popular_search_overlay(
+    client: AsyncClient,
+    async_session: AsyncSession,
+    fake_redis,
+):
+    """운영 메타는 고정 노출/수동 가중/제외 규칙으로 사용자 인기 검색어에 반영됩니다."""
+    await _insert_test_movies(async_session)
+
+    for _ in range(3):
+        await client.get("/api/v1/search/movies", params={"q": "인터스텔라"})
+    for _ in range(2):
+        await client.get("/api/v1/search/movies", params={"q": "기생충"})
+    await client.get("/api/v1/search/movies", params={"q": "라라랜드"})
+
+    async_session.add_all([
+        PopularSearchKeyword(
+            keyword="라라랜드",
+            display_rank=1,
+            manual_priority=0,
+            is_excluded=False,
+        ),
+        PopularSearchKeyword(
+            keyword="기생충",
+            display_rank=None,
+            manual_priority=0,
+            is_excluded=True,
+        ),
+        PopularSearchKeyword(
+            keyword="듄",
+            display_rank=None,
+            manual_priority=50,
+            is_excluded=False,
+        ),
+    ])
+    await async_session.flush()
+
+    response = await client.get("/api/v1/search/trending")
+    assert response.status_code == 200
+
+    data = response.json()
+    keywords = data["keywords"]
+    assert [item["keyword"] for item in keywords[:3]] == ["라라랜드", "듄", "인터스텔라"]
+    assert keywords[0]["rank"] == 1
+    assert keywords[0]["search_count"] == 1
+    assert keywords[1]["search_count"] == 0
+    assert all(item["keyword"] != "기생충" for item in keywords)
 
 
 @pytest.mark.asyncio
