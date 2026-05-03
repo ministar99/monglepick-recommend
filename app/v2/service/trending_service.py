@@ -159,14 +159,35 @@ class TrendingService:
             since=since,
             limit=candidate_limit,
         )
-        if not trending_rows:
+        overlay_keywords = await self._popular_search_repo.get_all_keywords()
+        ranked_keywords = build_popular_search_ranking(
+            trending_candidates=[
+                TrendingOverlayCandidate(
+                    keyword=row.keyword,
+                    search_count=row.search_count,
+                    base_rank=rank,
+                )
+                for rank, row in enumerate(trending_rows, start=1)
+            ],
+            overlay_keywords=[
+                PopularSearchOverlayMeta(
+                    keyword=item.keyword,
+                    display_rank=item.display_rank,
+                    manual_priority=item.manual_priority,
+                    is_excluded=item.is_excluded,
+                )
+                for item in overlay_keywords
+            ],
+            limit=limit,
+        )
+        if not ranked_keywords:
             return AdminPopularKeywordsResponse(keywords=[])
 
-        keyword_order = [row.keyword for row in trending_rows]
+        keyword_order = [item.keyword for item in ranked_keywords]
         history_stats = await self._history_repo.get_keyword_stats_since(since, keyword_order)
 
         items: list[AdminPopularKeywordItem] = []
-        for row in trending_rows:
+        for row in ranked_keywords:
             stats = history_stats.get(row.keyword, {})
             period_search_count = int(stats.get("search_count") or 0)
             click_count = int(stats.get("click_count") or 0)
@@ -184,7 +205,7 @@ class TrendingService:
             )
 
         return AdminPopularKeywordsResponse(
-            keywords=items[:limit]
+            keywords=items
         )
 
     @staticmethod

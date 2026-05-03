@@ -174,6 +174,12 @@ class PopularSearchKeywordDTO(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator("is_excluded", mode="before")
+    @classmethod
+    def _normalize_mysql_bit_flags(cls, value: Any) -> Any:
+        """MySQL BIT(1) 컬럼이 bytes로 들어오는 경우를 bool로 정규화합니다."""
+        return _parse_mysql_bool(value)
+
 
 class LikeDTO(BaseModel):
     """
