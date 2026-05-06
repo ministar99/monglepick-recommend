@@ -88,6 +88,8 @@ async def _insert_movies_for_worldcup(session: AsyncSession) -> list[Movie]:
             release_year=2020,
             rating=7.0 + (i % 3) * 0.5,
             vote_count=150,
+            # 장르 우선순위가 같을 때 popularity_score 높은 영화가 먼저 선발되는지 검증합니다.
+            popularity_score=float(i + 1),
             poster_path=f"/test{i + 1}.jpg",
             director=f"감독{i + 1}",
         )
@@ -358,6 +360,36 @@ async def test_generate_worldcup_bracket_prioritizes_more_genre_matches(
     # 2개 장르를 만족하는 영화 8편이 정확히 먼저 선발되어야 합니다.
     expected_priority_ids = {"1000", "1004", "1005", "1009", "1010", "1014", "1015", "1019"}
     assert candidate_ids == expected_priority_ids
+
+
+@pytest.mark.asyncio
+async def test_generate_worldcup_bracket_prioritizes_popular_movies_within_same_genre_match_count(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """장르 일치 수가 같으면 popularity_score가 높은 영화가 먼저 후보에 포함됩니다."""
+    await _insert_test_user(async_session)
+    await _insert_movies_for_worldcup(async_session)
+
+    response = await client.post(
+        "/api/v1/onboarding/worldcup/start",
+        json={
+            "sourceType": "GENRE",
+            "selectedGenres": ["액션"],
+            "roundSize": 8,
+        },
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    candidate_ids = {
+        match["movie_a"]["movie_id"] for match in data["matches"]
+    } | {
+        match["movie_b"]["movie_id"] for match in data["matches"]
+    }
+
+    expected_top_popularity_ids = {"1008", "1009", "1010", "1011", "1012", "1013", "1014", "1015"}
+    assert candidate_ids == expected_top_popularity_ids
 
 
 @pytest.mark.asyncio
