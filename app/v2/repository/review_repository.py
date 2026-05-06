@@ -232,6 +232,39 @@ class ReviewRepository:
             row = await cur.fetchone()
         return int(row["cnt"]) if row and row["cnt"] is not None else 0
 
+    async def get_user_average_rating(
+        self,
+        user_id: str,
+        *,
+        exclude_review_id: int | None = None,
+    ) -> float | None:
+        """특정 사용자의 활성 리뷰 평균 평점을 반환한다."""
+        review_columns = await self._get_columns("reviews")
+        review_id_column = "review_id" if "review_id" in review_columns else "id"
+        where_clauses = ["user_id = %s"]
+        params: list[object] = [user_id]
+
+        if exclude_review_id is not None:
+            where_clauses.append(f"{review_id_column} <> %s")
+            params.append(exclude_review_id)
+        if "is_deleted" in review_columns:
+            where_clauses.append("COALESCE(is_deleted, 0) = 0")
+        if "is_blinded" in review_columns:
+            where_clauses.append("COALESCE(is_blinded, 0) = 0")
+
+        sql = (
+            "SELECT AVG(rating) AS avg_rating "
+            "FROM reviews "
+            f"WHERE {' AND '.join(where_clauses)}"
+        )
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, tuple(params))
+            row = await cur.fetchone()
+
+        if not row or row.get("avg_rating") is None:
+            return None
+        return float(row["avg_rating"])
+
     async def exists_by_user_movie(self, user_id: str, movie_id: str) -> bool:
         """동일 사용자의 동일 영화 활성 리뷰 존재 여부를 확인한다."""
         review_columns = await self._get_columns("reviews")

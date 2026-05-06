@@ -11,7 +11,7 @@ import logging
 
 import aiomysql
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
 from app.config import get_settings
 from app.v2.api.deps import (
@@ -26,6 +26,7 @@ from app.model.schema import (
     AutocompleteResponse,
     MovieDetailResponse,
     MovieSearchResponse,
+    PersonalizedTopPicksRefreshResponse,
     PersonalizedTopPicksResponse,
     RecentSearchResponse,
     RelatedMoviesResponse,
@@ -37,6 +38,7 @@ from app.search_genre_catalog import normalize_search_genre_labels
 from app.v2.service.related_movie_service import RelatedMovieNotFoundError, RelatedMovieService
 from app.v2.service.autocomplete_service import AutocompleteService
 from app.v2.service.personalized_search_service import PersonalizedSearchService
+from app.v2.service.personalized_refresh_service import PersonalizedRefreshService
 from app.v2.service.search_service import MovieDetailNotFoundError, SearchService
 from app.v2.service.trending_service import TrendingService
 
@@ -177,9 +179,8 @@ async def get_home_box_office_movies(
     response_model=PersonalizedTopPicksResponse,
     summary="검색 초기 화면 개인화 추천 TOP picks",
     description=(
-        "로그인 사용자의 최애 영화/장르, 위시리스트, 내 리뷰, "
-        "co-watched CF, 박스오피스 fallback을 조합해 검색 초기 화면용 "
-        "개인화 추천 TOP picks를 반환합니다."
+        "로그인 사용자의 개인화 추천 TOP picks 캐시를 반환합니다. "
+        "계산 진행 여부와 마지막 캐시 생성 시각도 함께 내려줍니다."
     ),
 )
 async def get_personalized_top_picks(
@@ -188,9 +189,46 @@ async def get_personalized_top_picks(
     redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ):
-    """검색 초기 화면 전용 개인화 예상 픽 조회 엔드포인트."""
+    """검색 초기 화면 전용 개인화 예상 픽 캐시 조회 엔드포인트."""
     service = PersonalizedSearchService(conn, redis)
-    return await service.get_top_picks(user_id=user_id, limit=limit)
+    cached_response = await service.get_cached_top_picks(user_id=user_id, limit=limit)
+    response = cached_response or PersonalizedTopPicksResponse()
+    status_payload = await PersonalizedRefreshService.get_status(
+        redis,
+        user_id=user_id,
+        limit=limit,
+        has_cache=cached_response is not None,
+    )
+    return response.model_copy(update=status_payload)
+
+
+@router.post(
+    "/personalized/top-picks/refresh",
+    response_model=PersonalizedTopPicksRefreshResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="검색 초기 화면 개인화 추천 TOP picks 재계산 요청",
+    description="로그인 직후 또는 취향 변경 직후 개인화 추천 TOP picks 백그라운드 계산을 요청합니다.",
+)
+async def refresh_personalized_top_picks(
+    background_tasks: BackgroundTasks,
+    limit: int = Query(default=10, description="계산할 최대 반환 개수", ge=1, le=20),
+    reason: str = Query(default="manual", description="재계산 요청 이유"),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
+    user_id: str = Depends(get_current_user),
+):
+    """개인화 TOP picks 백그라운드 계산을 요청합니다."""
+    await PersonalizedRefreshService.enqueue_refresh(
+        user_id=user_id,
+        limit=limit,
+        reason=reason,
+        background_tasks=background_tasks,
+        redis_client=redis,
+    )
+    return PersonalizedTopPicksRefreshResponse(
+        accepted=True,
+        cache_state="queued",
+        is_calculating=True,
+    )
 
 
 @router.get(

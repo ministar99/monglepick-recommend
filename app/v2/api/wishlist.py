@@ -8,6 +8,7 @@ Backend의 /users/me/wishlist 계열 기능을 recommend(FastAPI)로 이관한�
 import logging
 
 import aiomysql
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Path, Query
 
 from app.model.schema import (
@@ -15,7 +16,8 @@ from app.model.schema import (
     WishlistStatusResponse,
     WishlistToggleResponse,
 )
-from app.v2.api.deps import get_conn, get_current_user
+from app.v2.api.deps import get_conn, get_current_user, get_redis_client_optional
+from app.v2.service.personalized_refresh_service import PersonalizedRefreshService
 from app.v2.service.wishlist_service import WishlistService
 
 logger = logging.getLogger(__name__)
@@ -62,11 +64,19 @@ async def get_wishlist_status(
 async def add_to_wishlist(
     movie_id: str = Path(..., description="영화 ID"),
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ) -> WishlistToggleResponse:
     """위시리스트에 영화를 추가한다."""
     service = WishlistService(conn)
-    return await service.add_to_wishlist(user_id=user_id, movie_id=movie_id)
+    response = await service.add_to_wishlist(user_id=user_id, movie_id=movie_id)
+    await PersonalizedRefreshService.mark_dirty(
+        user_id=user_id,
+        limit=10,
+        reason="wishlist",
+        redis_client=redis,
+    )
+    return response
 
 
 @router.delete(
@@ -77,9 +87,16 @@ async def add_to_wishlist(
 async def remove_from_wishlist(
     movie_id: str = Path(..., description="영화 ID"),
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ) -> WishlistToggleResponse:
     """위시리스트에서 영화를 제거한다."""
     service = WishlistService(conn)
-    return await service.remove_from_wishlist(user_id=user_id, movie_id=movie_id)
-
+    response = await service.remove_from_wishlist(user_id=user_id, movie_id=movie_id)
+    await PersonalizedRefreshService.mark_dirty(
+        user_id=user_id,
+        limit=10,
+        reason="wishlist",
+        redis_client=redis,
+    )
+    return response

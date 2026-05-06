@@ -522,6 +522,82 @@ class MovieRepository:
 
         return [MovieDTO(**row) for row in rows]
 
+    async def find_popular_by_genre_combination(
+        self,
+        *,
+        genres: list[str],
+        exclude_movie_ids: list[str] | None = None,
+        vote_count_min: int = 100,
+        limit: int = 20,
+    ) -> list[MovieDTO]:
+        """
+        지정 장르를 모두 포함하는 영화를 인기도 순으로 조회합니다.
+
+        선호 장르 교집합 섹션 전용 쿼리입니다. 장르 조합을 점차 완화하며 여러 번 호출될 수 있으므로,
+        WHERE 절은 장르 교집합과 추천 제외 목록에만 집중하고 정렬은 popularity_score 우선으로 둡니다.
+        """
+        normalized_genres = [
+            str(genre).strip()
+            for genre in genres
+            if isinstance(genre, str) and str(genre).strip()
+        ]
+        unique_genres = list(dict.fromkeys(normalized_genres))
+        if not unique_genres:
+            return []
+
+        normalized_exclude_ids = [
+            str(movie_id).strip()
+            for movie_id in (exclude_movie_ids or [])
+            if isinstance(movie_id, str) and str(movie_id).strip()
+        ]
+        normalized_limit = max(1, min(limit, 100))
+
+        conditions: list[str] = [
+            "(adult IS NULL OR adult = 0)",
+            "(certification IS NULL OR certification NOT IN (%s, %s))",
+            '(genres IS NULL OR CAST(genres AS CHAR) NOT LIKE %s)',
+        ]
+        params: list[object] = [
+            *list(EXCLUDED_SEARCH_CERTIFICATIONS),
+            f'%"{EXCLUDED_SEARCH_GENRES[0]}"%',
+        ]
+
+        for genre in unique_genres:
+            conditions.append("JSON_CONTAINS(genres, JSON_QUOTE(%s))")
+            params.append(genre)
+
+        if vote_count_min > 0:
+            conditions.append("vote_count >= %s")
+            params.append(vote_count_min)
+
+        if normalized_exclude_ids:
+            placeholders = ", ".join(["%s"] * len(normalized_exclude_ids))
+            conditions.append(f"movie_id NOT IN ({placeholders})")
+            params.extend(normalized_exclude_ids)
+
+        where_clause = " AND ".join(conditions)
+        sql = (
+            "SELECT * FROM movies "
+            f"WHERE {where_clause} "
+            "ORDER BY "
+            "popularity_score IS NULL ASC, "
+            "popularity_score DESC, "
+            "vote_count IS NULL ASC, "
+            "vote_count DESC, "
+            "rating IS NULL ASC, "
+            "rating DESC, "
+            "release_year IS NULL ASC, "
+            "release_year DESC "
+            "LIMIT %s"
+        )
+        params.append(normalized_limit)
+
+        async with self._conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+
+        return [MovieDTO(**row) for row in rows]
+
     async def autocomplete_titles(self, prefix: str, limit: int = 10) -> list[str]:
         """
         제목 자동완성 후보를 반환합니다.

@@ -14,7 +14,7 @@ import aiomysql
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.v2.api.deps import get_conn, get_current_user, get_redis_client
+from app.v2.api.deps import get_conn, get_current_user, get_redis_client, get_redis_client_optional
 from app.model.schema import (
     GenreListResponse,
     GenreSelectionRequest,
@@ -34,6 +34,7 @@ from app.model.schema import (
     WorldcupStartRequest,
 )
 from app.v2.service.onboarding_service import OnboardingService
+from app.v2.service.personalized_refresh_service import PersonalizedRefreshService
 from app.v2.service.worldcup_service import WorldcupService
 
 logger = logging.getLogger(__name__)
@@ -75,11 +76,19 @@ async def get_genres(
 async def save_genre_selection(
     request: GenreSelectionRequest,
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ):
     """장르 선택 저장 엔드포인트"""
     service = OnboardingService(conn)
-    return await service.save_genre_selection(user_id, request.selected_genres)
+    response = await service.save_genre_selection(user_id, request.selected_genres)
+    await PersonalizedRefreshService.mark_dirty(
+        user_id=user_id,
+        limit=10,
+        reason="onboarding_genres",
+        redis_client=redis,
+    )
+    return response
 
 
 # =========================================
@@ -185,7 +194,15 @@ async def submit_worldcup_round(
 ):
     """월드컵 라운드 결과 제출 엔드포인트"""
     service = WorldcupService(conn, redis)
-    return await service.submit_round(user_id, request)
+    response = await service.submit_round(user_id, request)
+    if response.next_round is None:
+        await PersonalizedRefreshService.mark_dirty(
+            user_id=user_id,
+            limit=10,
+            reason="worldcup",
+            redis_client=redis,
+        )
+    return response
 
 
 @router.get(
