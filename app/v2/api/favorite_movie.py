@@ -9,14 +9,16 @@ from __future__ import annotations
 import logging
 
 import aiomysql
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.model.schema import (
     FavoriteMovieListResponse,
     FavoriteMovieSaveRequest,
 )
-from app.v2.api.deps import get_conn, get_current_user
+from app.v2.api.deps import get_conn, get_current_user, get_redis_client_optional
 from app.v2.service.favorite_movie_service import FavoriteMovieService
+from app.v2.service.personalized_refresh_service import PersonalizedRefreshService
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +47,20 @@ async def get_favorite_movies(
 async def save_favorite_movies(
     payload: FavoriteMovieSaveRequest,
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ) -> FavoriteMovieListResponse:
     """모달에서 선택한 최애 영화 목록과 순서를 저장합니다."""
     service = FavoriteMovieService(conn)
     try:
-        return await service.save_favorite_movies(user_id=user_id, movie_ids=payload.movie_ids)
+        response = await service.save_favorite_movies(user_id=user_id, movie_ids=payload.movie_ids)
+        await PersonalizedRefreshService.mark_dirty(
+            user_id=user_id,
+            limit=10,
+            reason="favorite_movies",
+            redis_client=redis,
+        )
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -63,11 +73,19 @@ async def save_favorite_movies(
 async def reorder_favorite_movies(
     payload: FavoriteMovieSaveRequest,
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ) -> FavoriteMovieListResponse:
     """기존 최애 영화의 priority 순서를 저장합니다."""
     service = FavoriteMovieService(conn)
     try:
-        return await service.reorder_favorite_movies(user_id=user_id, movie_ids=payload.movie_ids)
+        response = await service.reorder_favorite_movies(user_id=user_id, movie_ids=payload.movie_ids)
+        await PersonalizedRefreshService.mark_dirty(
+            user_id=user_id,
+            limit=10,
+            reason="favorite_movies",
+            redis_client=redis,
+        )
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

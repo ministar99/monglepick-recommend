@@ -154,10 +154,33 @@ class PersonalizedMoviePick(BaseModel):
     personalized_sources: list[str] = Field(default_factory=list, description="후보 생성 소스 목록")
 
 
+class PersonalizedMovieSection(BaseModel):
+    """검색 초기 화면용 개인화 섹션"""
+    key: str = Field(description="섹션 고유 키")
+    title: str = Field(description="섹션 제목")
+    movies: list[PersonalizedMoviePick] = Field(default_factory=list, description="섹션 영화 목록")
+
+
 class PersonalizedTopPicksResponse(BaseModel):
     """검색 초기 화면용 개인화 추천 TOP picks 응답"""
     movies: list[PersonalizedMoviePick] = Field(default_factory=list, description="개인화 추천 영화 목록")
     total_candidates: int = Field(default=0, description="랭킹 전 후보 수")
+    genre_sections: list[PersonalizedMovieSection] = Field(default_factory=list, description="선호 장르 기반 섹션")
+    wishlist_movies: list[PersonalizedMoviePick] = Field(default_factory=list, description="위시리스트에 담아둔 영화 목록")
+    similar_taste_movies: list[PersonalizedMoviePick] = Field(default_factory=list, description="비슷한 취향 유저 기반 영화 목록")
+    review_sections: list[PersonalizedMovieSection] = Field(default_factory=list, description="높게 평가한 영화 기반 섹션")
+    cache_state: str = Field(default="empty", description="개인화 캐시 상태 (empty/queued/running/ready/failed)")
+    is_calculating: bool = Field(default=False, description="백그라운드 개인화 계산 진행 여부")
+    is_dirty: bool = Field(default=False, description="개인화 캐시 재계산 필요 여부")
+    should_refresh: bool = Field(default=False, description="현재 시점에 백그라운드 재계산을 시작해도 되는지 여부")
+    last_computed_at: datetime | None = Field(default=None, description="최근 캐시 계산 완료 시각")
+
+
+class PersonalizedTopPicksRefreshResponse(BaseModel):
+    """개인화 추천 백그라운드 계산 요청 응답"""
+    accepted: bool = Field(default=True, description="백그라운드 계산 요청 수락 여부")
+    cache_state: str = Field(default="queued", description="요청 직후 캐시 상태")
+    is_calculating: bool = Field(default=True, description="백그라운드 계산 진행 여부")
 
 
 class AutocompleteResponse(BaseModel):

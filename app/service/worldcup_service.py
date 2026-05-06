@@ -25,7 +25,6 @@ REQ_018: 월드컵 결과 → 장르 선호도 분석 (레이더 차트)
 
 import json
 import logging
-import random
 from collections import Counter
 from dataclasses import dataclass
 
@@ -763,21 +762,27 @@ class WorldcupService:
         - 2개 포함 영화
         - 1개 포함 영화
         순서로 후보를 채웁니다.
+        같은 장르 만족 수 그룹 안에서는 movies.popularity_score가 높은 영화를 먼저 선발합니다.
         """
-        grouped_movie_ids: dict[int, list[str]] = {}
+        grouped_movies: dict[int, list[Movie]] = {}
         selected_genre_set = set(selected_genres)
 
         for movie in movies:
             match_count = len(selected_genre_set.intersection(movie.get_genres_list()))
             if match_count <= 0:
                 continue
-            grouped_movie_ids.setdefault(match_count, []).append(movie.movie_id)
+            grouped_movies.setdefault(match_count, []).append(movie)
 
         prioritized_ids: list[str] = []
-        for match_count in sorted(grouped_movie_ids.keys(), reverse=True):
-            group_ids = grouped_movie_ids[match_count]
-            random.shuffle(group_ids)
-            prioritized_ids.extend(group_ids)
+        for match_count in sorted(grouped_movies.keys(), reverse=True):
+            sorted_group = sorted(
+                grouped_movies[match_count],
+                key=lambda movie: (
+                    -(movie.popularity_score or 0.0),
+                    movie.movie_id,
+                ),
+            )
+            prioritized_ids.extend(movie.movie_id for movie in sorted_group)
             if len(prioritized_ids) >= round_size:
                 break
 
