@@ -1,6 +1,12 @@
 import pytest
 
-from app.model.schema import MovieBrief, MovieSearchResponse, PaginationMeta
+from app.model.schema import (
+    MovieBrief,
+    MovieSearchResponse,
+    PaginationMeta,
+    RelatedMovieItem,
+    RelatedMoviesResponse,
+)
 from app.search_elasticsearch import ESSearchMovieItem, ESSearchMoviesResult
 from app.v2.model.dto import MovieDTO
 from app.v2.service.personalized_search_service import PersonalizedSearchService
@@ -50,6 +56,44 @@ class StubFavoriteMovieRepository:
 
     async def list_by_user(self, user_id: str) -> list[dict]:
         return self._rows
+
+
+class StubUserPreference:
+    def __init__(self, genres: list[str] | None = None):
+        self._genres = genres or []
+
+    def get_genres_list(self) -> list[str]:
+        return self._genres
+
+
+class StubWorldcupResult:
+    def __init__(
+        self,
+        *,
+        winner_movie_id: str | None = None,
+        runner_up_movie_id: str | None = None,
+        genre_preferences: str | None = None,
+    ):
+        self.winner_movie_id = winner_movie_id
+        self.runner_up_movie_id = runner_up_movie_id
+        self.genre_preferences = genre_preferences
+
+
+class StubUserPreferenceRepository:
+    def __init__(
+        self,
+        *,
+        user_preference: StubUserPreference | None = None,
+        worldcup_result: StubWorldcupResult | None = None,
+    ):
+        self._user_preference = user_preference
+        self._worldcup_result = worldcup_result
+
+    async def get_by_user_id(self, user_id: str):
+        return self._user_preference
+
+    async def get_worldcup_result(self, user_id: str):
+        return self._worldcup_result
 
 
 class StubWishlistRepository:
@@ -228,6 +272,17 @@ class StubSearchEs:
         return list(movies)[:normalized_limit]
 
 
+class StubRelatedMovieService:
+    def __init__(self, responses_by_movie_id: dict[str, RelatedMoviesResponse] | None = None):
+        self._responses_by_movie_id = responses_by_movie_id or {}
+
+    async def get_related_movies(self, movie_id: str, limit: int | None = None):
+        response = self._responses_by_movie_id.get(movie_id, RelatedMoviesResponse(movies=[]))
+        if limit is None:
+            return response
+        return RelatedMoviesResponse(movies=response.movies[:limit])
+
+
 @pytest.mark.asyncio
 async def test_personalized_top_picks_ranks_hybrid_candidates_and_excludes_seen_movies():
     favorite_movie = _movie(
@@ -321,6 +376,7 @@ async def test_personalized_top_picks_ranks_hybrid_candidates_and_excludes_seen_
     service._favorite_movie_repo = StubFavoriteMovieRepository(
         [{"movie_id": "fav-1"}]
     )
+    service._user_preference_repo = StubUserPreferenceRepository()
     service._wishlist_repo = StubWishlistRepository(
         [{"movie_id": "wish-1"}]
     )
@@ -390,6 +446,7 @@ async def test_personalized_top_picks_falls_back_to_box_office_when_user_signal_
     service = PersonalizedSearchService(conn=None)
     service._favorite_genre_repo = StubFavoriteGenreRepository([])
     service._favorite_movie_repo = StubFavoriteMovieRepository([])
+    service._user_preference_repo = StubUserPreferenceRepository()
     service._wishlist_repo = StubWishlistRepository([])
     service._review_repo = StubReviewRepository([])
     service._personalized_repo = StubPersonalizedRepository()
@@ -486,6 +543,7 @@ async def test_personalized_top_picks_uses_es_candidates_when_available():
     service._favorite_movie_repo = StubFavoriteMovieRepository(
         [{"movie_id": "fav-es-1"}]
     )
+    service._user_preference_repo = StubUserPreferenceRepository()
     service._wishlist_repo = StubWishlistRepository([])
     service._review_repo = StubReviewRepository([])
     service._personalized_repo = StubPersonalizedRepository()
@@ -570,6 +628,7 @@ async def test_personalized_top_picks_replaces_invalid_poster_candidates_by_exac
     service._favorite_movie_repo = StubFavoriteMovieRepository(
         [{"movie_id": "fav-es-1"}]
     )
+    service._user_preference_repo = StubUserPreferenceRepository()
     service._wishlist_repo = StubWishlistRepository([])
     service._review_repo = StubReviewRepository([])
     service._personalized_repo = StubPersonalizedRepository()
@@ -597,3 +656,106 @@ async def test_personalized_top_picks_replaces_invalid_poster_candidates_by_exac
     assert result.movies[0].poster_url == (
         f"{service._settings.TMDB_IMAGE_BASE_URL}/interstellar.jpg"
     )
+
+
+@pytest.mark.asyncio
+async def test_personalized_top_picks_includes_cached_sections_payload():
+    favorite_movie = _movie(
+        "fav-genre-1",
+        title="인터스텔라",
+        genres=["SF", "드라마"],
+        director="크리스토퍼 놀란",
+        cast=["매튜 맥커너히"],
+        rating=8.7,
+        vote_count=4100,
+        release_year=2014,
+    )
+    wishlist_movie = _movie(
+        "wish-section-1",
+        title="이터널 선샤인",
+        genres=["로맨스", "드라마"],
+        director="미셸 공드리",
+        cast=["짐 캐리"],
+        rating=8.3,
+        vote_count=2200,
+        release_year=2004,
+    )
+    genre_pick = _movie(
+        "genre-pick-1",
+        title="블레이드 러너 2049",
+        genres=["SF"],
+        director="드니 빌뇌브",
+        cast=["라이언 고슬링"],
+        rating=8.0,
+        vote_count=2500,
+        release_year=2017,
+    )
+    review_seed = _movie(
+        "review-section-1",
+        title="라라랜드",
+        genres=["드라마", "로맨스"],
+        director="데이미언 셔젤",
+        cast=["엠마 스톤"],
+        rating=8.0,
+        vote_count=2100,
+        release_year=2016,
+    )
+
+    related_item = RelatedMovieItem(
+        movie_id="related-1",
+        title="위플래쉬",
+        title_en=None,
+        genres=["드라마", "음악"],
+        release_year=2014,
+        rating=8.4,
+        vote_count=2400,
+        poster_url="https://image.tmdb.org/t/p/w500/whiplash.jpg",
+        trailer_url=None,
+        overview="집착에 가까운 성장 서사입니다.",
+        relation_score=0.0,
+        relation_reasons=["비슷한 취향 유저들이 함께 좋아한 작품이에요"],
+        relation_sources=["cowatched_cf"],
+    )
+
+    service = PersonalizedSearchService(conn=None)
+    service._favorite_genre_repo = StubFavoriteGenreRepository([{"genre_name": "SF"}])
+    service._favorite_movie_repo = StubFavoriteMovieRepository([{"movie_id": "fav-genre-1"}])
+    service._user_preference_repo = StubUserPreferenceRepository()
+    service._wishlist_repo = StubWishlistRepository([{"movie_id": "wish-section-1"}])
+    service._review_repo = StubReviewRepository(
+        [{"movie_id": "review-section-1", "movie_title": "라라랜드", "rating": 5.0, "created_at": "2026-05-01T12:00:00"}]
+    )
+    service._personalized_repo = StubPersonalizedRepository()
+    service._movie_repo = StubMovieRepository(
+        movies_by_id={
+            "fav-genre-1": favorite_movie,
+            "wish-section-1": wishlist_movie,
+            "review-section-1": review_seed,
+            "genre-pick-1": genre_pick,
+        },
+        search_results={
+            ("genres", "SF"): [genre_pick],
+            ("director", "크리스토퍼 놀란"): [genre_pick],
+            ("actor", "매튜 맥커너히"): [],
+        },
+    )
+    service._match_cowatch_service = StubMatchCowatchService()
+    service._search_service = StubSearchService([])
+    service._search_es = StubSearchEs(available=False)
+    service._create_related_movie_service = lambda: StubRelatedMovieService(
+        {
+            "review-section-1": RelatedMoviesResponse(movies=[related_item]),
+            "fav-genre-1": RelatedMoviesResponse(movies=[related_item]),
+        }
+    )
+
+    result = await service.get_top_picks(user_id="user-sections", limit=3)
+
+    assert result.genre_sections
+    assert result.genre_sections[0].title == "SF 장르 예상 픽"
+    assert result.wishlist_movies
+    assert result.wishlist_movies[0].movie_id == "wish-section-1"
+    assert result.review_sections
+    assert result.review_sections[0].movies[0].movie_id == "related-1"
+    assert result.similar_taste_movies
+    assert result.similar_taste_movies[0].movie_id == "related-1"

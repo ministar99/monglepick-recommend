@@ -8,7 +8,8 @@ recommend(FastAPI)에서 직접 처리한다.
 import logging
 
 import aiomysql
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+import redis.asyncio as aioredis
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, status
 
 from app.model.schema import (
     LikeResponse,
@@ -18,7 +19,8 @@ from app.model.schema import (
     ReviewUpdateRequest,
     UserReviewListResponse,
 )
-from app.v2.api.deps import get_conn, get_current_user, get_current_user_optional
+from app.v2.api.deps import get_conn, get_current_user, get_current_user_optional, get_redis_client_optional
+from app.v2.service.personalized_refresh_service import PersonalizedRefreshService
 from app.v2.service.review_service import DuplicateReviewError, ReviewService
 
 logger = logging.getLogger(__name__)
@@ -62,8 +64,10 @@ async def get_reviews(
 )
 async def create_review(
     payload: ReviewCreateRequest,
+    background_tasks: BackgroundTasks,
     movie_id: str = Path(..., description="영화 ID"),
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ) -> ReviewItem:
     """
@@ -75,7 +79,21 @@ async def create_review(
     """
     service = ReviewService(conn)
     try:
-        return await service.create_review(movie_id=movie_id, payload=payload, user_id=user_id)
+        response = await service.create_review(movie_id=movie_id, payload=payload, user_id=user_id)
+        should_refresh = await service.should_refresh_personalized_profile(
+            user_id=user_id,
+            rating=response.rating,
+            exclude_review_id=response.id,
+        )
+        if should_refresh:
+            await PersonalizedRefreshService.enqueue_refresh(
+                user_id=user_id,
+                limit=10,
+                reason="review",
+                background_tasks=background_tasks,
+                redis_client=redis,
+            )
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except DuplicateReviewError as exc:
@@ -89,20 +107,36 @@ async def create_review(
 )
 async def update_review(
     payload: ReviewUpdateRequest,
+    background_tasks: BackgroundTasks,
     movie_id: str = Path(..., description="영화 ID"),
     review_id: int = Path(..., description="리뷰 ID"),
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ) -> ReviewItem:
     """작성자 본인의 리뷰를 수정한다."""
     service = ReviewService(conn)
     try:
-        return await service.update_review(
+        response = await service.update_review(
             movie_id=movie_id,
             review_id=review_id,
             payload=payload,
             user_id=user_id,
         )
+        should_refresh = await service.should_refresh_personalized_profile(
+            user_id=user_id,
+            rating=response.rating,
+            exclude_review_id=review_id,
+        )
+        if should_refresh:
+            await PersonalizedRefreshService.enqueue_refresh(
+                user_id=user_id,
+                limit=10,
+                reason="review",
+                background_tasks=background_tasks,
+                redis_client=redis,
+            )
+        return response
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -115,15 +149,24 @@ async def update_review(
     summary="리뷰 삭제",
 )
 async def delete_review(
+    background_tasks: BackgroundTasks,
     movie_id: str = Path(..., description="영화 ID"),
     review_id: int = Path(..., description="리뷰 ID"),
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ) -> None:
     """작성자 본인의 리뷰를 삭제한다."""
     service = ReviewService(conn)
     try:
         await service.delete_review(movie_id=movie_id, review_id=review_id, user_id=user_id)
+        await PersonalizedRefreshService.enqueue_refresh(
+            user_id=user_id,
+            limit=10,
+            reason="review",
+            background_tasks=background_tasks,
+            redis_client=redis,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except PermissionError as exc:

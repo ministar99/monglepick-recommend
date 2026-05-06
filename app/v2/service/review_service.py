@@ -44,6 +44,8 @@ class DuplicateReviewError(Exception):
 class ReviewService:
     """리뷰 비즈니스 로직 서비스."""
 
+    POSITIVE_RATING_FALLBACK_THRESHOLD = 4.0
+
     def __init__(self, conn: aiomysql.Connection):
         self._conn = conn
         self._repo = ReviewRepository(conn)
@@ -176,6 +178,22 @@ class ReviewService:
 
         await self._repo.delete(review_id)
         logger.info("[v2] 리뷰 삭제 user=%s review=%s", user_id, review_id)
+
+    async def should_refresh_personalized_profile(
+        self,
+        *,
+        user_id: str,
+        rating: float,
+        exclude_review_id: int | None = None,
+    ) -> bool:
+        """해당 평점이 개인화 재계산을 유도할 정도로 긍정적인지 판별한다."""
+        average_rating = await self._repo.get_user_average_rating(
+            user_id,
+            exclude_review_id=exclude_review_id,
+        )
+        if average_rating is None:
+            return float(rating) >= self.POSITIVE_RATING_FALLBACK_THRESHOLD
+        return float(rating) > average_rating
 
     async def toggle_review_like(self, movie_id: str, review_id: int, user_id: str) -> LikeResponse:
         """리뷰 좋아요를 토글한다."""

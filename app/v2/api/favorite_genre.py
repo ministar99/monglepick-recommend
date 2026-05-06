@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import aiomysql
-from fastapi import APIRouter, Depends, HTTPException, status
+import redis.asyncio as aioredis
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
 from app.model.schema import FavoriteGenreListResponse, FavoriteGenreSaveRequest
-from app.v2.api.deps import get_conn, get_current_user
+from app.v2.api.deps import get_conn, get_current_user, get_redis_client_optional
 from app.v2.service.favorite_genre_service import FavoriteGenreService
+from app.v2.service.personalized_refresh_service import PersonalizedRefreshService
 
 router = APIRouter(prefix="/users/me", tags=["선호 장르 (v2 Raw SQL)"])
 
@@ -37,12 +39,22 @@ async def get_favorite_genres(
 )
 async def save_favorite_genres(
     payload: FavoriteGenreSaveRequest,
+    background_tasks: BackgroundTasks,
     conn: aiomysql.Connection = Depends(get_conn),
+    redis: aioredis.Redis | None = Depends(get_redis_client_optional),
     user_id: str = Depends(get_current_user),
 ) -> FavoriteGenreListResponse:
     """사용자가 선택한 선호 장르 목록과 순서를 저장합니다."""
     service = FavoriteGenreService(conn)
     try:
-        return await service.save_favorite_genres(user_id=user_id, genre_ids=payload.genre_ids)
+        response = await service.save_favorite_genres(user_id=user_id, genre_ids=payload.genre_ids)
+        await PersonalizedRefreshService.enqueue_refresh(
+            user_id=user_id,
+            limit=10,
+            reason="favorite_genres",
+            background_tasks=background_tasks,
+            redis_client=redis,
+        )
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

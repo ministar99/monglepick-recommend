@@ -104,6 +104,38 @@ async def test_get_user_reviews_BIT값도_좋아요상태로_정규화한다():
 
 
 @pytest.mark.asyncio
+async def test_should_refresh_personalized_profile_사용자평균보다_높은평점만_반영한다():
+    service = ReviewService(conn=None)
+    service._repo = AsyncMock()
+    service._repo.get_user_average_rating.return_value = 3.8
+
+    assert await service.should_refresh_personalized_profile(
+        user_id="user_1",
+        rating=4.5,
+    ) is True
+    assert await service.should_refresh_personalized_profile(
+        user_id="user_1",
+        rating=3.5,
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_should_refresh_personalized_profile_평균이없으면_4점이상만_반영한다():
+    service = ReviewService(conn=None)
+    service._repo = AsyncMock()
+    service._repo.get_user_average_rating.return_value = None
+
+    assert await service.should_refresh_personalized_profile(
+        user_id="user_1",
+        rating=4.0,
+    ) is True
+    assert await service.should_refresh_personalized_profile(
+        user_id="user_1",
+        rating=3.5,
+    ) is False
+
+
+@pytest.mark.asyncio
 async def test_exists_by_user_movie_소프트삭제된리뷰는_중복검사에서_제외한다():
     fake_cursor = _FakeCursor(row=None)
     repo = ReviewRepository(conn=_FakeConn(fake_cursor))
