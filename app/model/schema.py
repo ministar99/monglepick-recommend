@@ -171,6 +171,8 @@ class PersonalizedTopPicksResponse(BaseModel):
     review_sections: list[PersonalizedMovieSection] = Field(default_factory=list, description="높게 평가한 영화 기반 섹션")
     cache_state: str = Field(default="empty", description="개인화 캐시 상태 (empty/queued/running/ready/failed)")
     is_calculating: bool = Field(default=False, description="백그라운드 개인화 계산 진행 여부")
+    is_dirty: bool = Field(default=False, description="개인화 캐시 재계산 필요 여부")
+    should_refresh: bool = Field(default=False, description="현재 시점에 백그라운드 재계산을 시작해도 되는지 여부")
     last_computed_at: datetime | None = Field(default=None, description="최근 캐시 계산 완료 시각")
 
 

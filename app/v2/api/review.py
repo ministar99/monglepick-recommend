@@ -9,7 +9,7 @@ import logging
 
 import aiomysql
 import redis.asyncio as aioredis
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 from app.model.schema import (
     LikeResponse,
@@ -64,7 +64,6 @@ async def get_reviews(
 )
 async def create_review(
     payload: ReviewCreateRequest,
-    background_tasks: BackgroundTasks,
     movie_id: str = Path(..., description="영화 ID"),
     conn: aiomysql.Connection = Depends(get_conn),
     redis: aioredis.Redis | None = Depends(get_redis_client_optional),
@@ -86,11 +85,10 @@ async def create_review(
             exclude_review_id=response.id,
         )
         if should_refresh:
-            await PersonalizedRefreshService.enqueue_refresh(
+            await PersonalizedRefreshService.mark_dirty(
                 user_id=user_id,
                 limit=10,
                 reason="review",
-                background_tasks=background_tasks,
                 redis_client=redis,
             )
         return response
@@ -107,7 +105,6 @@ async def create_review(
 )
 async def update_review(
     payload: ReviewUpdateRequest,
-    background_tasks: BackgroundTasks,
     movie_id: str = Path(..., description="영화 ID"),
     review_id: int = Path(..., description="리뷰 ID"),
     conn: aiomysql.Connection = Depends(get_conn),
@@ -129,11 +126,10 @@ async def update_review(
             exclude_review_id=review_id,
         )
         if should_refresh:
-            await PersonalizedRefreshService.enqueue_refresh(
+            await PersonalizedRefreshService.mark_dirty(
                 user_id=user_id,
                 limit=10,
                 reason="review",
-                background_tasks=background_tasks,
                 redis_client=redis,
             )
         return response
@@ -149,7 +145,6 @@ async def update_review(
     summary="리뷰 삭제",
 )
 async def delete_review(
-    background_tasks: BackgroundTasks,
     movie_id: str = Path(..., description="영화 ID"),
     review_id: int = Path(..., description="리뷰 ID"),
     conn: aiomysql.Connection = Depends(get_conn),
@@ -160,11 +155,10 @@ async def delete_review(
     service = ReviewService(conn)
     try:
         await service.delete_review(movie_id=movie_id, review_id=review_id, user_id=user_id)
-        await PersonalizedRefreshService.enqueue_refresh(
+        await PersonalizedRefreshService.mark_dirty(
             user_id=user_id,
             limit=10,
             reason="review",
-            background_tasks=background_tasks,
             redis_client=redis,
         )
     except LookupError as exc:

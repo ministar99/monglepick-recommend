@@ -147,11 +147,13 @@ class StubMovieRepository:
         search_results: dict[tuple[str, str], list[MovieDTO]] | None = None,
         collection_results: dict[str, list[MovieDTO]] | None = None,
         title_candidates_by_key: dict[str, list[MovieDTO]] | None = None,
+        genre_combo_results: dict[tuple[str, ...], list[MovieDTO]] | None = None,
     ):
         self._movies_by_id = movies_by_id
         self._search_results = search_results or {}
         self._collection_results = collection_results or {}
         self._title_candidates_by_key = title_candidates_by_key or {}
+        self._genre_combo_results = genre_combo_results or {}
 
     async def find_by_ids(self, movie_ids: list[str]) -> list[MovieDTO]:
         return [self._movies_by_id[movie_id] for movie_id in movie_ids if movie_id in self._movies_by_id]
@@ -203,6 +205,23 @@ class StubMovieRepository:
             for movie in self._title_candidates_by_key.get(title, [])[:limit]:
                 merged[movie.movie_id] = movie
         return list(merged.values())
+
+    async def find_popular_by_genre_combination(
+        self,
+        *,
+        genres: list[str],
+        exclude_movie_ids: list[str] | None = None,
+        vote_count_min: int = 100,
+        limit: int = 20,
+    ) -> list[MovieDTO]:
+        excluded = set(exclude_movie_ids or [])
+        movies = list(self._genre_combo_results.get(tuple(genres), []))
+        filtered = [
+            movie
+            for movie in movies
+            if movie.movie_id not in excluded and (movie.vote_count or 0) >= vote_count_min
+        ]
+        return filtered[:limit]
 
 
 class StubMatchCowatchService:
@@ -659,6 +678,95 @@ async def test_personalized_top_picks_replaces_invalid_poster_candidates_by_exac
 
 
 @pytest.mark.asyncio
+async def test_personalized_top_picks_builds_genre_intersection_sections_with_relaxed_fallbacks():
+    excluded_pick = _movie(
+        "genre-excluded-1",
+        title="교집합 제외 영화",
+        genres=["코미디", "액션", "로맨스"],
+        rating=7.8,
+        vote_count=320,
+        release_year=2020,
+    )
+    full_pick = _movie(
+        "genre-full-1",
+        title="교집합 대표 영화",
+        genres=["코미디", "액션", "로맨스"],
+        rating=7.7,
+        vote_count=240,
+        release_year=2021,
+    )
+    pair_pick_one = _movie(
+        "genre-pair-1",
+        title="코미디 액션 보강 영화",
+        genres=["코미디", "액션"],
+        rating=7.5,
+        vote_count=180,
+        release_year=2022,
+    )
+    pair_pick_two = _movie(
+        "genre-pair-2",
+        title="코미디 로맨스 보강 영화",
+        genres=["코미디", "로맨스"],
+        rating=7.3,
+        vote_count=170,
+        release_year=2023,
+    )
+
+    service = PersonalizedSearchService(conn=None)
+    service._favorite_genre_repo = StubFavoriteGenreRepository(
+        [{"genre_name": "코미디"}, {"genre_name": "액션"}, {"genre_name": "로맨스"}]
+    )
+    service._favorite_movie_repo = StubFavoriteMovieRepository([])
+    service._user_preference_repo = StubUserPreferenceRepository()
+    service._wishlist_repo = StubWishlistRepository([{"movie_id": "genre-excluded-1"}])
+    service._review_repo = StubReviewRepository([])
+    service._personalized_repo = StubPersonalizedRepository()
+    service._movie_repo = StubMovieRepository(
+        movies_by_id={},
+        genre_combo_results={
+            ("코미디", "액션", "로맨스"): [excluded_pick, full_pick],
+            ("코미디", "액션"): [pair_pick_one],
+            ("코미디", "로맨스"): [pair_pick_two],
+        },
+    )
+    service._match_cowatch_service = StubMatchCowatchService()
+    service._search_service = StubSearchService([])
+    service._search_es = StubSearchEs(available=False)
+
+    result = await service.get_top_picks(user_id="user-genre-section", limit=5)
+
+    assert result.genre_sections
+    assert result.genre_sections[0].title == "#코미디 #액션 #로맨스 장르 픽!"
+    assert [movie.movie_id for movie in result.genre_sections[0].movies[:3]] == [
+        "genre-full-1",
+        "genre-pair-1",
+        "genre-pair-2",
+    ]
+    assert all(
+        movie.movie_id != "genre-excluded-1"
+        for movie in result.genre_sections[0].movies
+    )
+
+
+def test_personalized_genre_section_groups_split_five_genres_into_three_and_two():
+    service = PersonalizedSearchService(conn=None)
+
+    groups = service._build_genre_section_groups(
+        user_id="user-grouping",
+        selected_genres=["액션", "코미디", "SF", "판타지", "스릴러"],
+    )
+
+    assert [len(group) for group in groups] == [3, 2]
+    assert set(genre for group in groups for genre in group) == {
+        "액션",
+        "코미디",
+        "SF",
+        "판타지",
+        "스릴러",
+    }
+
+
+@pytest.mark.asyncio
 async def test_personalized_top_picks_includes_cached_sections_payload():
     favorite_movie = _movie(
         "fav-genre-1",
@@ -669,16 +777,6 @@ async def test_personalized_top_picks_includes_cached_sections_payload():
         rating=8.7,
         vote_count=4100,
         release_year=2014,
-    )
-    wishlist_movie = _movie(
-        "wish-section-1",
-        title="이터널 선샤인",
-        genres=["로맨스", "드라마"],
-        director="미셸 공드리",
-        cast=["짐 캐리"],
-        rating=8.3,
-        vote_count=2200,
-        release_year=2004,
     )
     genre_pick = _movie(
         "genre-pick-1",
@@ -716,6 +814,21 @@ async def test_personalized_top_picks_includes_cached_sections_payload():
         relation_reasons=["비슷한 취향 유저들이 함께 좋아한 작품이에요"],
         relation_sources=["cowatched_cf"],
     )
+    related_excluded = RelatedMovieItem(
+        movie_id="related-excluded",
+        title="이미 본 추천 제외 영화",
+        title_en=None,
+        genres=["드라마"],
+        release_year=2018,
+        rating=7.0,
+        vote_count=900,
+        poster_url="https://image.tmdb.org/t/p/w500/excluded.jpg",
+        trailer_url=None,
+        overview="이미 본 영화라 섹션에서 제외되어야 합니다.",
+        relation_score=0.0,
+        relation_reasons=["이미 본 영화예요"],
+        relation_sources=["cowatched_cf"],
+    )
 
     service = PersonalizedSearchService(conn=None)
     service._favorite_genre_repo = StubFavoriteGenreRepository([{"genre_name": "SF"}])
@@ -725,11 +838,12 @@ async def test_personalized_top_picks_includes_cached_sections_payload():
     service._review_repo = StubReviewRepository(
         [{"movie_id": "review-section-1", "movie_title": "라라랜드", "rating": 5.0, "created_at": "2026-05-01T12:00:00"}]
     )
-    service._personalized_repo = StubPersonalizedRepository()
+    service._personalized_repo = StubPersonalizedRepository(
+        watched_ids=["related-excluded"]
+    )
     service._movie_repo = StubMovieRepository(
         movies_by_id={
             "fav-genre-1": favorite_movie,
-            "wish-section-1": wishlist_movie,
             "review-section-1": review_seed,
             "genre-pick-1": genre_pick,
         },
@@ -738,24 +852,31 @@ async def test_personalized_top_picks_includes_cached_sections_payload():
             ("director", "크리스토퍼 놀란"): [genre_pick],
             ("actor", "매튜 맥커너히"): [],
         },
+        genre_combo_results={
+            ("SF",): [genre_pick],
+        },
     )
     service._match_cowatch_service = StubMatchCowatchService()
     service._search_service = StubSearchService([])
     service._search_es = StubSearchEs(available=False)
     service._create_related_movie_service = lambda: StubRelatedMovieService(
         {
-            "review-section-1": RelatedMoviesResponse(movies=[related_item]),
-            "fav-genre-1": RelatedMoviesResponse(movies=[related_item]),
+            "review-section-1": RelatedMoviesResponse(movies=[related_excluded, related_item]),
+            "fav-genre-1": RelatedMoviesResponse(movies=[related_excluded, related_item]),
         }
     )
 
     result = await service.get_top_picks(user_id="user-sections", limit=3)
 
     assert result.genre_sections
-    assert result.genre_sections[0].title == "SF 장르 예상 픽"
-    assert result.wishlist_movies
-    assert result.wishlist_movies[0].movie_id == "wish-section-1"
+    assert result.genre_sections[0].title == "#SF 장르 픽!"
+    assert result.wishlist_movies == []
     assert result.review_sections
     assert result.review_sections[0].movies[0].movie_id == "related-1"
+    assert all(
+        movie.movie_id != "related-excluded"
+        for movie in result.review_sections[0].movies
+    )
     assert result.similar_taste_movies
     assert result.similar_taste_movies[0].movie_id == "related-1"
+    assert all(movie.movie_id != "related-excluded" for movie in result.similar_taste_movies)

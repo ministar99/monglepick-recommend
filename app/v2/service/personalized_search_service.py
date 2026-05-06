@@ -15,6 +15,7 @@ from itertools import combinations
 import json
 import logging
 import math
+import random
 import time
 
 import aiomysql
@@ -103,13 +104,15 @@ class PersonalizedSearchService:
     """검색 초기 화면 개인화 TOP picks 계산 서비스."""
 
     CACHE_PREFIX = "search:personalized_top_picks"
-    CACHE_VERSION = "v6"
+    CACHE_VERSION = "v7"
     CACHE_TTL_SECONDS = 1800
 
     DEFAULT_LIMIT = 10
     MAX_LIMIT = 20
     GENRE_SECTION_COUNT = 5
+    GENRE_SECTION_GROUP_MAX_SIZE = 3
     GENRE_SECTION_LIMIT = 20
+    GENRE_SECTION_VOTE_COUNT_MIN = 100
     WISHLIST_SECTION_LIMIT = 20
     SIMILAR_TASTE_LIMIT = 40
     REVIEW_SECTION_COUNT = 5
@@ -345,6 +348,10 @@ class PersonalizedSearchService:
         behavior_affinity = self._normalize_behavior_affinity(
             behavior_profile.get("genre_affinity")
         )
+        selected_genres = self._build_selected_genres_for_sections(
+            favorite_genres=favorite_genres,
+            user_preference_genres=user_preference_genres,
+        )
         cbf_weight, cf_weight = self._resolve_signal_weights(behavior_profile)
 
         exclude_ids = set(
@@ -447,28 +454,28 @@ class PersonalizedSearchService:
             ranked_candidates=ranked_candidates,
             limit=normalized_limit,
         )
-        genre_sections, wishlist_movies, similar_taste_movies, review_sections = await asyncio.gather(
-            self._build_genre_sections(
-                preferred_genres=preferred_genres,
-            ),
-            self._build_wishlist_section_movies(
-                wishlist_seed_records=wishlist_seed_records,
-            ),
-            self._build_similar_taste_movies(
-                favorite_seed_records=favorite_seed_records,
-                review_rows=review_rows,
-            ),
-            self._build_review_sections(
-                review_rows=review_rows,
-                records_by_id=seed_records_by_id,
-            ),
+        # aiomysql 단일 커넥션은 동시 read를 허용하지 않으므로,
+        # 섹션 계산은 같은 커넥션 기준으로 직렬 실행합니다.
+        genre_sections = await self._build_genre_sections(
+            user_id=user_id,
+            selected_genres=selected_genres,
+            exclude_ids=exclude_ids,
+        )
+        similar_taste_movies = await self._build_similar_taste_movies(
+            favorite_seed_records=favorite_seed_records,
+            review_rows=review_rows,
+            exclude_ids=exclude_ids,
+        )
+        review_sections = await self._build_review_sections(
+            review_rows=review_rows,
+            records_by_id=seed_records_by_id,
+            exclude_ids=exclude_ids,
         )
 
         response = PersonalizedTopPicksResponse(
             movies=[self._to_pick(candidate) for candidate in selected_candidates],
             total_candidates=len(ranked_candidates),
             genre_sections=genre_sections,
-            wishlist_movies=wishlist_movies,
             similar_taste_movies=similar_taste_movies,
             review_sections=review_sections,
         )
@@ -477,109 +484,169 @@ class PersonalizedSearchService:
     async def _build_genre_sections(
         self,
         *,
-        preferred_genres: list[str],
+        user_id: str,
+        selected_genres: list[str],
+        exclude_ids: set[str],
     ) -> list[PersonalizedMovieSection]:
-        """선호 장르별 추천 섹션을 구성합니다."""
-        target_genres = preferred_genres[: self.GENRE_SECTION_COUNT]
-        if not target_genres:
+        """명시 선호 장르 교집합 기반 추천 섹션을 구성합니다."""
+        genre_groups = self._build_genre_section_groups(
+            user_id=user_id,
+            selected_genres=selected_genres,
+        )[: self.GENRE_SECTION_COUNT]
+        if not genre_groups:
             return []
 
         sections: list[PersonalizedMovieSection] = []
-        if self._search_es.is_available():
-            results = await asyncio.gather(
-                *[
-                    self._search_es.search_movies(
-                        keyword=None,
-                        search_type="title",
-                        genre=None,
-                        genres=[genre],
-                        genre_match_groups=None,
-                        year_from=None,
-                        year_to=None,
-                        rating_min=None,
-                        rating_max=None,
-                        popularity_min=None,
-                        popularity_max=None,
-                        vote_count_min=None,
-                        sort_by="rating",
-                        sort_order="desc",
-                        page=1,
-                        size=self.GENRE_SECTION_LIMIT,
-                    )
-                    for genre in target_genres
-                ],
-                return_exceptions=True,
-            )
-            for index, genre in enumerate(target_genres):
-                result = results[index]
-                if isinstance(result, Exception) or result is None:
-                    logger.warning(
-                        "personalized_genre_section_es_failed genre=%s error=%s",
-                        genre,
-                        result,
-                    )
-                    section = await self._build_genre_section_from_db(genre)
-                else:
-                    section = await self._build_genre_section_from_es(
-                        genre=genre,
-                        movies=result.movies,
-                    )
-                if section is not None and section.movies:
-                    sections.append(section)
-            return sections
-
-        for genre in target_genres:
-            section = await self._build_genre_section_from_db(genre)
-            if section is not None and section.movies:
-                sections.append(section)
+        for genre_group in genre_groups:
+            try:
+                result = await self._build_genre_section_for_group(
+                    genres=genre_group,
+                    exclude_ids=exclude_ids,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "personalized_genre_section_failed genres=%s error=%s",
+                    genre_group,
+                    exc,
+                )
+                continue
+            if result is not None and result.movies:
+                sections.append(result)
         return sections
 
-    async def _build_genre_section_from_db(
+    def _build_selected_genres_for_sections(
         self,
-        genre: str,
-    ) -> PersonalizedMovieSection | None:
-        """MySQL 검색 결과로 장르 섹션 하나를 구성합니다."""
-        movies, _ = await self._movie_repo.search(
-            genres=[genre],
-            sort_by="rating",
-            sort_order="desc",
-            page=1,
-            size=self.GENRE_SECTION_LIMIT,
+        *,
+        favorite_genres: list[dict],
+        user_preference_genres: list[str],
+    ) -> list[str]:
+        """선호 장르 섹션에 사용할 명시 장르 목록을 구성합니다."""
+        favorite_genre_names = [
+            str(item.get("genre_name") or "").strip()
+            for item in favorite_genres
+            if item.get("genre_name")
+        ]
+        explicit_user_genres = [
+            str(genre).strip()
+            for genre in user_preference_genres
+            if isinstance(genre, str) and str(genre).strip()
+        ]
+        return self._unique_ordered(favorite_genre_names + explicit_user_genres)
+
+    def _build_genre_section_groups(
+        self,
+        *,
+        user_id: str,
+        selected_genres: list[str],
+    ) -> list[list[str]]:
+        """선호 장르를 최대 3개 묶음으로 섞어 섹션 단위로 나눕니다."""
+        normalized_genres = self._unique_ordered(
+            [
+                str(genre).strip()
+                for genre in selected_genres
+                if isinstance(genre, str) and str(genre).strip()
+            ]
         )
+        if not normalized_genres:
+            return []
+        if len(normalized_genres) <= self.GENRE_SECTION_GROUP_MAX_SIZE:
+            return [normalized_genres]
+
+        shuffled_genres = list(normalized_genres)
+        randomizer = random.Random(f"{user_id}:{'|'.join(normalized_genres)}")
+        randomizer.shuffle(shuffled_genres)
+
+        group_sizes = self._build_genre_group_sizes(len(shuffled_genres))
+        groups: list[list[str]] = []
+        cursor = 0
+        for size in group_sizes:
+            groups.append(shuffled_genres[cursor : cursor + size])
+            cursor += size
+        return groups
+
+    def _build_genre_group_sizes(self, count: int) -> list[int]:
+        """최대 3개, 가능하면 2~3개 묶음만 남도록 그룹 크기를 계산합니다."""
+        if count <= 0:
+            return []
+        if count <= self.GENRE_SECTION_GROUP_MAX_SIZE:
+            return [count]
+
+        sizes: list[int] = []
+        remaining = count
+        while remaining > 0:
+            if remaining == 4:
+                sizes.extend([2, 2])
+                break
+            if remaining <= self.GENRE_SECTION_GROUP_MAX_SIZE:
+                sizes.append(remaining)
+                break
+            sizes.append(self.GENRE_SECTION_GROUP_MAX_SIZE)
+            remaining -= self.GENRE_SECTION_GROUP_MAX_SIZE
+        return sizes
+
+    async def _build_genre_section_for_group(
+        self,
+        *,
+        genres: list[str],
+        exclude_ids: set[str],
+    ) -> PersonalizedMovieSection | None:
+        """장르 교집합 -> 부분 교집합 순으로 완화하며 섹션을 채웁니다."""
+        normalized_genres = self._unique_ordered(
+            [
+                str(genre).strip()
+                for genre in genres
+                if isinstance(genre, str) and str(genre).strip()
+            ]
+        )
+        if not normalized_genres:
+            return None
+
+        collected_records: list[PersonalizedMovieRecord] = []
+        seen_movie_ids: set[str] = set(exclude_ids)
+        for subset in self._iter_genre_section_subsets(normalized_genres):
+            remaining_limit = self.GENRE_SECTION_LIMIT - len(collected_records)
+            if remaining_limit <= 0:
+                break
+            movies = await self._movie_repo.find_popular_by_genre_combination(
+                genres=list(subset),
+                exclude_movie_ids=list(seen_movie_ids),
+                vote_count_min=self.GENRE_SECTION_VOTE_COUNT_MIN,
+                limit=remaining_limit,
+            )
+            if not movies:
+                continue
+            for movie in movies:
+                if movie.movie_id in seen_movie_ids:
+                    continue
+                seen_movie_ids.add(movie.movie_id)
+                collected_records.append(self._record_from_dto(movie))
+
         picks = await self._records_to_preview_picks(
-            records=[self._record_from_dto(movie) for movie in movies],
+            records=collected_records,
             limit=self.GENRE_SECTION_LIMIT,
-            default_reason=f"{genre} 장르에서 골랐어요",
-            default_source="genre_section",
+            default_reason="선호 장르 조합에서 골랐어요",
+            default_source="genre_intersection_section",
+            exclude_movie_ids=exclude_ids,
         )
         if not picks:
             return None
+
+        title = " ".join(f"#{genre}" for genre in normalized_genres) + " 장르 픽!"
         return PersonalizedMovieSection(
-            key=f"genre-{genre}",
-            title=f"{genre} 장르 예상 픽",
+            key=f"genre-{'-'.join(normalized_genres)}",
+            title=title,
             movies=picks,
         )
 
-    async def _build_genre_section_from_es(
+    def _iter_genre_section_subsets(
         self,
-        *,
-        genre: str,
-        movies: list[ESSearchMovieItem],
-    ) -> PersonalizedMovieSection | None:
-        """ES 검색 결과로 장르 섹션 하나를 구성합니다."""
-        picks = await self._records_to_preview_picks(
-            records=[self._record_from_es_movie(movie) for movie in movies],
-            limit=self.GENRE_SECTION_LIMIT,
-            default_reason=f"{genre} 장르에서 골랐어요",
-            default_source="genre_section_es",
-        )
-        if not picks:
-            return None
-        return PersonalizedMovieSection(
-            key=f"genre-{genre}",
-            title=f"{genre} 장르 예상 픽",
-            movies=picks,
-        )
+        genres: list[str],
+    ) -> list[tuple[str, ...]]:
+        """전체 교집합부터 단일 장르까지 완화 순서대로 조합을 반환합니다."""
+        subsets: list[tuple[str, ...]] = []
+        for subset_size in range(len(genres), 0, -1):
+            subsets.extend(combinations(genres, subset_size))
+        return subsets
 
     async def _build_wishlist_section_movies(
         self,
@@ -599,6 +666,7 @@ class PersonalizedSearchService:
         *,
         review_rows: list[dict],
         records_by_id: dict[str, PersonalizedMovieRecord],
+        exclude_ids: set[str],
     ) -> list[PersonalizedMovieSection]:
         """높게 평가한 리뷰 기반 추천 섹션을 구성합니다."""
         section_rows = self._select_review_section_rows(review_rows)[: self.REVIEW_SECTION_COUNT]
@@ -606,22 +674,17 @@ class PersonalizedSearchService:
             return []
 
         related_service = self._create_related_movie_service()
-        results = await asyncio.gather(
-            *[
-                self._build_review_section(
+        sections: list[PersonalizedMovieSection] = []
+        for row in section_rows:
+            try:
+                result = await self._build_review_section(
                     related_service=related_service,
                     row=row,
                     records_by_id=records_by_id,
+                    exclude_ids=exclude_ids,
                 )
-                for row in section_rows
-            ],
-            return_exceptions=True,
-        )
-
-        sections: list[PersonalizedMovieSection] = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning("personalized_review_section_failed error=%s", result)
+            except Exception as exc:
+                logger.warning("personalized_review_section_failed error=%s", exc)
                 continue
             if result is not None and result.movies:
                 sections.append(result)
@@ -633,6 +696,7 @@ class PersonalizedSearchService:
         related_service: RelatedMovieService,
         row: dict,
         records_by_id: dict[str, PersonalizedMovieRecord],
+        exclude_ids: set[str],
     ) -> PersonalizedMovieSection | None:
         """리뷰 하나에 대응하는 related 섹션을 구성합니다."""
         movie_id = str(row.get("movie_id") or "").strip()
@@ -656,7 +720,10 @@ class PersonalizedSearchService:
         if not section_title:
             section_title = records_by_id.get(movie_id).title if records_by_id.get(movie_id) else movie_id
 
-        movies = self._related_items_to_preview_picks(response.movies)
+        movies = self._related_items_to_preview_picks(
+            response.movies,
+            exclude_movie_ids=exclude_ids,
+        )
         if not movies:
             return None
         return PersonalizedMovieSection(
@@ -670,6 +737,7 @@ class PersonalizedSearchService:
         *,
         favorite_seed_records: list[PersonalizedMovieRecord],
         review_rows: list[dict],
+        exclude_ids: set[str],
     ) -> list[PersonalizedMoviePick]:
         """비슷한 취향 유저 기반 섹션 영화를 구성합니다."""
         related_service = self._create_related_movie_service()
@@ -681,31 +749,35 @@ class PersonalizedSearchService:
             ]
         )[:4]
         if not seed_ids:
-            return await self._build_similar_taste_fallback_movies()
+            return await self._build_similar_taste_fallback_movies(
+                exclude_ids=exclude_ids,
+            )
 
-        results = await asyncio.gather(
-            *[
-                related_service.get_related_movies(movie_id, limit=15)
-                for movie_id in seed_ids
-            ],
-            return_exceptions=True,
-        )
         merged_items: list = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning("personalized_similar_taste_related_failed error=%s", result)
+        for movie_id in seed_ids:
+            try:
+                result = await related_service.get_related_movies(movie_id, limit=15)
+            except Exception as exc:
+                logger.warning("personalized_similar_taste_related_failed error=%s", exc)
                 continue
             merged_items.extend(result.movies)
 
         picks = self._merge_related_items_to_preview_picks(
             merged_items,
             limit=self.SIMILAR_TASTE_LIMIT,
+            exclude_movie_ids=exclude_ids,
         )
         if picks:
             return picks
-        return await self._build_similar_taste_fallback_movies()
+        return await self._build_similar_taste_fallback_movies(
+            exclude_ids=exclude_ids,
+        )
 
-    async def _build_similar_taste_fallback_movies(self) -> list[PersonalizedMoviePick]:
+    async def _build_similar_taste_fallback_movies(
+        self,
+        *,
+        exclude_ids: set[str],
+    ) -> list[PersonalizedMoviePick]:
         """비슷한 취향 섹션이 비었을 때 박스오피스로 폴백합니다."""
         try:
             response = await self._search_service.get_home_box_office_movies(
@@ -721,6 +793,7 @@ class PersonalizedSearchService:
             limit=self.SIMILAR_TASTE_LIMIT,
             default_reason="최근 많이 보는 인기작이에요",
             default_source="similar_taste_fallback",
+            exclude_movie_ids=exclude_ids,
         )
 
     async def _add_genre_candidates(
@@ -1515,12 +1588,18 @@ class PersonalizedSearchService:
         limit: int,
         default_reason: str | None,
         default_source: str | None,
+        exclude_movie_ids: set[str] | None = None,
     ) -> list[PersonalizedMoviePick]:
         """record 목록을 포스터 보정 후 섹션 미리보기 pick 목록으로 변환합니다."""
         if not records or limit <= 0:
             return []
 
-        deduped_records = self._dedupe_records_by_movie_id(records)
+        exclude_movie_ids = exclude_movie_ids or set()
+        deduped_records = [
+            record
+            for record in self._dedupe_records_by_movie_id(records)
+            if record.movie_id not in exclude_movie_ids
+        ]
         title_lookup = await self._build_preview_title_lookup(deduped_records)
         resolved_records: list[PersonalizedMovieRecord] = []
         for record in deduped_records:
@@ -1581,13 +1660,20 @@ class PersonalizedSearchService:
     def _related_items_to_preview_picks(
         self,
         items: list[object],
+        *,
+        exclude_movie_ids: set[str] | None = None,
     ) -> list[PersonalizedMoviePick]:
         """related movie 응답을 섹션용 preview pick 목록으로 변환합니다."""
         picks: list[PersonalizedMoviePick] = []
         seen_movie_ids: set[str] = set()
+        exclude_movie_ids = exclude_movie_ids or set()
         for item in items:
             movie_id = str(getattr(item, "movie_id", "") or "").strip()
-            if not movie_id or movie_id in seen_movie_ids:
+            if (
+                not movie_id
+                or movie_id in seen_movie_ids
+                or movie_id in exclude_movie_ids
+            ):
                 continue
             seen_movie_ids.add(movie_id)
             record = PersonalizedMovieRecord(
@@ -1628,9 +1714,13 @@ class PersonalizedSearchService:
         items: list[object],
         *,
         limit: int,
+        exclude_movie_ids: set[str] | None = None,
     ) -> list[PersonalizedMoviePick]:
         """여러 related 응답을 하나의 preview pick 목록으로 합칩니다."""
-        return self._related_items_to_preview_picks(items)[:limit]
+        return self._related_items_to_preview_picks(
+            items,
+            exclude_movie_ids=exclude_movie_ids,
+        )[:limit]
 
     def _build_preferred_genres(
         self,

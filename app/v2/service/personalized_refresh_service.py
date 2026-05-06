@@ -11,7 +11,6 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 
-import aiomysql
 import redis.asyncio as aioredis
 from fastapi import BackgroundTasks
 
@@ -26,11 +25,33 @@ class PersonalizedRefreshService:
     """개인화 TOP picks 백그라운드 계산 스케줄러."""
 
     STATUS_KEY_PREFIX = "search:personalized_top_picks:status"
-    STATUS_VERSION = "v1"
+    STATUS_VERSION = "v2"
     STATUS_TTL_SECONDS = 3600
+    REFRESH_COOLDOWN_SECONDS = 300
 
     _inflight_keys: set[str] = set()
     _pending_rerun_keys: set[str] = set()
+
+    @classmethod
+    async def mark_dirty(
+        cls,
+        *,
+        user_id: str,
+        limit: int,
+        reason: str,
+        redis_client: aioredis.Redis | None = None,
+    ) -> None:
+        """개인화 캐시 재계산 필요 상태만 기록합니다."""
+        await cls._write_status(
+            redis_client,
+            user_id=user_id,
+            limit=limit,
+            mapping={
+                "dirty": "1",
+                "dirty_reason": reason,
+                "dirty_at": cls._utcnow_iso(),
+            },
+        )
 
     @classmethod
     async def enqueue_refresh(
@@ -145,6 +166,8 @@ class PersonalizedRefreshService:
         status = {
             "cache_state": default_state,
             "is_calculating": False,
+            "is_dirty": False,
+            "should_refresh": False,
             "last_computed_at": None,
         }
         if redis_client is None:
@@ -172,6 +195,21 @@ class PersonalizedRefreshService:
         computed_at = cls._parse_datetime(payload.get("last_computed_at"))
         if computed_at is not None:
             status["last_computed_at"] = computed_at
+
+        is_dirty = cls._parse_bool(payload.get("dirty"))
+        status["is_dirty"] = is_dirty
+
+        requested_at = cls._parse_datetime(payload.get("requested_at"))
+        cooldown_elapsed = (
+            requested_at is None
+            or (datetime.now(timezone.utc) - requested_at).total_seconds() >= cls.REFRESH_COOLDOWN_SECONDS
+        )
+        status["should_refresh"] = (
+            has_cache
+            and is_dirty
+            and not status["is_calculating"]
+            and cooldown_elapsed
+        )
 
         if not has_cache and status["cache_state"] == "ready":
             status["cache_state"] = "empty"
@@ -217,6 +255,7 @@ class PersonalizedRefreshService:
                 "state": "queued",
                 "reason": reason,
                 "requested_at": cls._utcnow_iso(),
+                "dirty": "1",
             },
         )
 
@@ -238,6 +277,7 @@ class PersonalizedRefreshService:
                 "state": "running",
                 "reason": reason,
                 "started_at": cls._utcnow_iso(),
+                "dirty": "1",
             },
         )
 
@@ -252,6 +292,22 @@ class PersonalizedRefreshService:
         computed_at: datetime,
     ) -> None:
         """상태 키를 ready로 갱신합니다."""
+        has_newer_dirty_marker = await cls._has_newer_dirty_marker(
+            redis_client,
+            user_id=user_id,
+            limit=limit,
+        )
+        dirty_mapping = (
+            {
+                "dirty": "1",
+            }
+            if has_newer_dirty_marker
+            else {
+                "dirty": "0",
+                "dirty_reason": "",
+                "dirty_at": "",
+            }
+        )
         await cls._write_status(
             redis_client,
             user_id=user_id,
@@ -261,6 +317,7 @@ class PersonalizedRefreshService:
                 "reason": reason,
                 "last_computed_at": computed_at.isoformat(),
                 "last_error": "",
+                **dirty_mapping,
             },
         )
 
@@ -282,6 +339,7 @@ class PersonalizedRefreshService:
             mapping={
                 "state": "failed",
                 "reason": reason,
+                "dirty": "1",
                 "last_error": error_message[:500],
             },
         )
@@ -320,6 +378,31 @@ class PersonalizedRefreshService:
             return None
 
     @classmethod
+    async def _has_newer_dirty_marker(
+        cls,
+        redis_client: aioredis.Redis | None,
+        *,
+        user_id: str,
+        limit: int,
+    ) -> bool:
+        if redis_client is None:
+            return False
+
+        try:
+            payload = await redis_client.hgetall(cls._status_key(user_id=user_id, limit=limit))
+        except Exception:
+            return False
+
+        if not cls._parse_bool(payload.get("dirty")):
+            return False
+
+        dirty_at = cls._parse_datetime(payload.get("dirty_at"))
+        requested_at = cls._parse_datetime(payload.get("requested_at"))
+        if dirty_at is None or requested_at is None:
+            return False
+        return dirty_at > requested_at
+
+    @classmethod
     def _status_key(cls, *, user_id: str, limit: int) -> str:
         return f"{cls.STATUS_KEY_PREFIX}:{cls.STATUS_VERSION}:{user_id}:limit:{limit}"
 
@@ -339,3 +422,11 @@ class PersonalizedRefreshService:
             return datetime.fromisoformat(str(value))
         except ValueError:
             return None
+
+    @staticmethod
+    def _parse_bool(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", errors="ignore")
+        return str(value).strip().lower() in {"1", "true", "yes", "y"}
