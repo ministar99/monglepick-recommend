@@ -13,6 +13,7 @@
 """
 
 from dataclasses import dataclass
+import re
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,11 @@ SEARCH_GENRE_CATALOG: tuple[SearchGenreCatalogEntry, ...] = (
     SearchGenreCatalogEntry("판타지", ("판타지",), 29680),
     SearchGenreCatalogEntry("모험", ("모험", "어드벤처", "활극"), 27876),
     SearchGenreCatalogEntry("가족", ("가족",), 34461),
-    SearchGenreCatalogEntry("SF", ("SF",), 25766),
+    SearchGenreCatalogEntry(
+        "SF",
+        ("SF", "Sci-Fi", "Sci Fi", "SciFi", "Science Fiction", "Science-Fiction", "공상과학"),
+        25766,
+    ),
     SearchGenreCatalogEntry("아동", ("아동",), 497),
     SearchGenreCatalogEntry("음악", ("음악", "뮤직"), 61683),
     SearchGenreCatalogEntry("군사", ("군사",), 962),
@@ -83,6 +88,54 @@ _SEARCH_GENRE_LEGACY_LABEL_MAP = {
     "인물": "인물/전기",
     "전기": "인물/전기",
 }
+_PARENTHETICAL_PATTERN = re.compile(r"\s*[\(\（][^)\）]*[\)\）]\s*")
+
+
+def _normalize_search_genre_lookup_key(value: str) -> str:
+    """장르 lookup 키 비교용 문자열을 정규화합니다."""
+    return " ".join(str(value).strip().split()).casefold()
+
+
+def _build_search_genre_lookup_keys(value: str) -> list[str]:
+    """label/alias/유사표기 매칭에 사용할 lookup 키 후보를 생성합니다."""
+    normalized = _normalize_search_genre_lookup_key(value)
+    if not normalized:
+        return []
+
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def add(key: str) -> None:
+        cleaned = _normalize_search_genre_lookup_key(key)
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        keys.append(cleaned)
+
+    add(normalized)
+
+    without_parenthetical = _PARENTHETICAL_PATTERN.sub("", normalized).strip()
+    add(without_parenthetical)
+
+    for candidate in (normalized, without_parenthetical):
+        if candidate.endswith("극") and len(candidate) > 1:
+            add(candidate[:-1])
+        if candidate.endswith("영화") and len(candidate) > 2:
+            add(candidate[:-2])
+
+    return keys
+
+
+_SEARCH_GENRE_LOOKUP_MAP: dict[str, str] = {}
+
+for entry in SEARCH_GENRE_CATALOG:
+    for source in (entry.label, *entry.aliases):
+        for key in _build_search_genre_lookup_keys(source):
+            _SEARCH_GENRE_LOOKUP_MAP.setdefault(key, entry.label)
+
+for legacy_label, canonical_label in _SEARCH_GENRE_LEGACY_LABEL_MAP.items():
+    for key in _build_search_genre_lookup_keys(legacy_label):
+        _SEARCH_GENRE_LOOKUP_MAP[key] = canonical_label
 
 
 def get_search_genre_options() -> list[SearchGenreCatalogEntry]:
@@ -104,15 +157,17 @@ def normalize_search_genre_labels(labels: list[str] | None) -> list[str]:
     seen: set[str] = set()
 
     for label in labels:
-        cleaned = label.strip()
-        cleaned = _SEARCH_GENRE_LEGACY_LABEL_MAP.get(cleaned, cleaned)
-        if not cleaned or cleaned in seen:
-            continue
-        if cleaned not in _SEARCH_GENRE_LABEL_MAP:
+        canonical_label = None
+        for lookup_key in _build_search_genre_lookup_keys(label):
+            canonical_label = _SEARCH_GENRE_LOOKUP_MAP.get(lookup_key)
+            if canonical_label:
+                break
+
+        if not canonical_label or canonical_label in seen:
             continue
 
-        seen.add(cleaned)
-        normalized.append(cleaned)
+        seen.add(canonical_label)
+        normalized.append(canonical_label)
 
     return normalized
 

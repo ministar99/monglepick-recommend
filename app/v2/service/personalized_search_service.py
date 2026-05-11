@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import random
+import re
 import time
 
 import aiomysql
@@ -28,6 +29,7 @@ from app.model.schema import (
     PersonalizedMovieSection,
     PersonalizedTopPicksResponse,
 )
+from app.search_genre_catalog import get_search_genre_alias_groups
 from app.search_elasticsearch import ESSearchMovieItem, ElasticsearchSearchClient
 from app.v2.model.dto import MovieDTO
 from app.v2.repository.favorite_genre_repository import FavoriteGenreRepository
@@ -47,6 +49,7 @@ from app.v2.service.related_movie_service import RelatedMovieService
 from app.v2.service.search_service import SearchService
 
 logger = logging.getLogger(__name__)
+_HANGUL_TITLE_PATTERN = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
 
 
 @dataclass
@@ -104,7 +107,7 @@ class PersonalizedSearchService:
     """검색 초기 화면 개인화 TOP picks 계산 서비스."""
 
     CACHE_PREFIX = "search:personalized_top_picks"
-    CACHE_VERSION = "v7"
+    CACHE_VERSION = "v8"
     CACHE_TTL_SECONDS = 1800
 
     DEFAULT_LIMIT = 10
@@ -113,6 +116,7 @@ class PersonalizedSearchService:
     GENRE_SECTION_GROUP_MAX_SIZE = 3
     GENRE_SECTION_LIMIT = 20
     GENRE_SECTION_VOTE_COUNT_MIN = 100
+    TOP_PICKS_MIN_VOTE_COUNT = 100
     WISHLIST_SECTION_LIMIT = 20
     SIMILAR_TASTE_LIMIT = 40
     REVIEW_SECTION_COUNT = 5
@@ -450,8 +454,13 @@ class PersonalizedSearchService:
             ranked_candidates=ranked_candidates,
             limit=normalized_limit,
         )
+        eligible_ranked_candidates = [
+            candidate
+            for candidate in ranked_candidates
+            if self._is_top_pick_eligible(candidate.movie)
+        ]
         selected_candidates = self._select_ranked_candidates(
-            ranked_candidates=ranked_candidates,
+            ranked_candidates=eligible_ranked_candidates,
             limit=normalized_limit,
         )
         # aiomysql 단일 커넥션은 동시 read를 허용하지 않으므로,
@@ -474,7 +483,7 @@ class PersonalizedSearchService:
 
         response = PersonalizedTopPicksResponse(
             movies=[self._to_pick(candidate) for candidate in selected_candidates],
-            total_candidates=len(ranked_candidates),
+            total_candidates=len(eligible_ranked_candidates),
             genre_sections=genre_sections,
             similar_taste_movies=similar_taste_movies,
             review_sections=review_sections,
@@ -607,8 +616,10 @@ class PersonalizedSearchService:
             remaining_limit = self.GENRE_SECTION_LIMIT - len(collected_records)
             if remaining_limit <= 0:
                 break
+            alias_groups = self._resolve_genre_alias_groups(list(subset))
             movies = await self._movie_repo.find_popular_by_genre_combination(
                 genres=list(subset),
+                genre_alias_groups=alias_groups,
                 exclude_movie_ids=list(seen_movie_ids),
                 vote_count_min=self.GENRE_SECTION_VOTE_COUNT_MIN,
                 limit=remaining_limit,
@@ -647,6 +658,23 @@ class PersonalizedSearchService:
         for subset_size in range(len(genres), 0, -1):
             subsets.extend(combinations(genres, subset_size))
         return subsets
+
+    def _resolve_genre_alias_groups(
+        self,
+        genres: list[str],
+    ) -> list[list[str]]:
+        """선호 장르 라벨을 DB 매칭용 alias 그룹으로 변환합니다."""
+        alias_groups: list[list[str]] = []
+        for genre in genres:
+            resolved_groups = get_search_genre_alias_groups([genre])
+            if resolved_groups:
+                alias_groups.append(resolved_groups[0])
+                continue
+
+            cleaned = str(genre).strip()
+            if cleaned:
+                alias_groups.append([cleaned])
+        return alias_groups
 
     async def _build_wishlist_section_movies(
         self,
@@ -818,7 +846,7 @@ class PersonalizedSearchService:
                         search_type="title",
                         genre=None,
                         genres=[genre],
-                        genre_match_groups=None,
+                        genre_match_groups=self._resolve_genre_alias_groups([genre]),
                         year_from=None,
                         year_to=None,
                         rating_min=None,
@@ -1033,8 +1061,10 @@ class PersonalizedSearchService:
         exclude_ids: set[str],
     ) -> None:
         """ES 사용 불가 시 기존 MySQL 장르 검색으로 폴백합니다."""
+        genre_match_groups = self._resolve_genre_alias_groups([genre])
         movies, _ = await self._movie_repo.search(
             genres=[genre],
+            genre_match_groups=genre_match_groups,
             sort_by="rating",
             sort_order="desc",
             page=1,
@@ -2051,6 +2081,22 @@ class PersonalizedSearchService:
             movie.vote_count is not None and movie.vote_count >= cls.POPULAR_MIN_VOTE_COUNT
         )
         return rating_ok or vote_ok
+
+    @staticmethod
+    def _has_korean_title(title: str | None) -> bool:
+        """한글 제목이 포함된 경우만 한국어 제목으로 간주합니다."""
+        normalized_title = str(title or "").strip()
+        if not normalized_title:
+            return False
+        return bool(_HANGUL_TITLE_PATTERN.search(normalized_title))
+
+    @classmethod
+    def _is_top_pick_eligible(cls, movie: PersonalizedMovieRecord) -> bool:
+        """예상 픽 TOP 10에 노출할 최소 품질 조건을 판정합니다."""
+        vote_count_ok = bool(
+            movie.vote_count is not None and movie.vote_count >= cls.TOP_PICKS_MIN_VOTE_COUNT
+        )
+        return vote_count_ok and cls._has_korean_title(movie.title)
 
     @staticmethod
     def _genre_similarity(left: list[str], right: list[str]) -> float:

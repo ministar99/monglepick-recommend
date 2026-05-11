@@ -27,7 +27,6 @@ from app.model.schema import (
 )
 from app.search_elasticsearch import ESSearchMovieItem, ElasticsearchSearchClient
 from app.search_genre_catalog import (
-    expand_search_genre_aliases,
     get_search_genre_alias_groups,
     normalize_search_genre_labels,
 )
@@ -99,7 +98,6 @@ class SearchService:
         keyword_cleaned = keyword.strip() if keyword and keyword.strip() else None
         selected_genres = normalize_search_genre_labels(genres)
         selected_genre_alias_groups = get_search_genre_alias_groups(selected_genres)
-        expanded_genres = expand_search_genre_aliases(selected_genres)
         is_genre_discovery_search = keyword_cleaned is None and bool(selected_genres)
         search_history_keyword = (
             keyword_cleaned if keyword_cleaned is not None else ",".join(selected_genres)
@@ -136,18 +134,24 @@ class SearchService:
                 size=size,
             )
             if es_result is not None:
-                es_movies = es_result.movies
-                total = es_result.total
-                did_you_mean = es_result.did_you_mean
-                related_queries = es_result.related_queries
-                search_source = "elasticsearch"
+                if is_genre_discovery_search and es_result.total == 0:
+                    logger.info(
+                        "search_es_genre_discovery_empty_fallback",
+                        extra={"genres": selected_genres},
+                    )
+                else:
+                    es_movies = es_result.movies
+                    total = es_result.total
+                    did_you_mean = es_result.did_you_mean
+                    related_queries = es_result.related_queries
+                    search_source = "elasticsearch"
 
         if es_movies is None:
             movies, total = await self._movie_repo.search(
                 keyword=keyword_cleaned,
                 search_type=search_type,
                 genre=genre,
-                genres=expanded_genres if is_genre_discovery_search else None,
+                genres=None,
                 genre_match_groups=selected_genre_alias_groups if is_genre_discovery_search else None,
                 year_from=year_from,
                 year_to=year_to,
