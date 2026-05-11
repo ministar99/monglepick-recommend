@@ -14,9 +14,12 @@ DDL 기준: movie_id VARCHAR(50) PK, release_year INT, genres JSON
 - director 컬럼 직접 검색: DDL에 director VARCHAR(200) 존재
 """
 
+from datetime import date
+
 from sqlalchemy import Select, String, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.genre_discovery_recommendation import build_genre_discovery_recommendation_params
 from app.model.entity import Movie
 
 # 검색 결과에서는 성인물/청소년관람불가 콘텐츠를 공통 제외합니다.
@@ -69,8 +72,8 @@ class MovieRepository:
             keyword: 검색 키워드 (제목/감독/배우)
             search_type: 검색 대상 ("title", "director", "actor", "all")
             genre: 장르 필터 (예: "액션")
-            genres: 다중 장르 검색용 장르 목록 (OR 조건)
-            genre_match_groups: 선택 장르별 alias 그룹 목록 (매칭 개수 우선 정렬용)
+            genres: 다중 장르 검색용 장르 목록 (genre_match_groups 미사용 시 OR 조건)
+            genre_match_groups: 선택 장르별 alias 그룹 목록 (그룹 간 AND, 그룹 내부 OR)
             year_from: 개봉 연도 시작 (포함)
             year_to: 개봉 연도 끝 (포함)
             rating_min: 최소 평점 (포함)
@@ -147,9 +150,26 @@ class MovieRepository:
             count_query = count_query.where(genre_condition)
 
         # ─────────────────────────────────────
-        # 다중 장르 필터 (선택 장르 중 하나 이상 포함)
+        # 다중 장르 필터
         # ─────────────────────────────────────
-        if genres:
+        if genre_match_groups:
+            for alias_group in genre_match_groups:
+                unique_aliases = [alias for alias in dict.fromkeys(alias_group) if alias]
+                if not unique_aliases:
+                    continue
+
+                alias_conditions = [
+                    self._json_array_contains(Movie.genres, alias)
+                    for alias in unique_aliases
+                ]
+                genre_group_condition = (
+                    alias_conditions[0]
+                    if len(alias_conditions) == 1
+                    else or_(*alias_conditions)
+                )
+                query = query.where(genre_group_condition)
+                count_query = count_query.where(genre_group_condition)
+        elif genres:
             genre_conditions = [
                 self._json_array_contains(Movie.genres, genre_name)
                 for genre_name in dict.fromkeys(genres)
@@ -203,13 +223,16 @@ class MovieRepository:
         # 정렬 적용
         # ─────────────────────────────────────
         if genre_match_groups:
-            # 장르 탐색 검색은 "선택 장르를 많이 만족한 영화"를 먼저 보여줍니다.
-            query = self._apply_genre_match_priority(
-                query=query,
-                genre_match_groups=genre_match_groups,
-                sort_by=sort_by,
-                sort_order=sort_order,
-            )
+            if sort_by == "relevance":
+                query = self._apply_genre_recommendation_sort(query)
+            else:
+                # 선택 장르 alias 그룹 정의를 같은 방식으로 정렬 점수에도 재사용합니다.
+                query = self._apply_genre_match_priority(
+                    query=query,
+                    genre_match_groups=genre_match_groups,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                )
         else:
             query = self._apply_sort(query, sort_by, sort_order)
 
@@ -486,13 +509,7 @@ class MovieRepository:
         sort_order: str,
     ) -> Select:
         """
-        선택 장르 매칭 개수 우선 정렬을 적용합니다.
-
-        예를 들어 사용자가 장르 3개를 골랐다면:
-        1. 3개 모두 포함된 영화
-        2. 2개 포함된 영화
-        3. 1개 포함된 영화
-        순서로 먼저 정렬하고, 같은 구간 안에서는 기존 정렬 기준을 유지합니다.
+        선택 장르 alias 그룹 기반 점수를 기존 정렬 앞에 적용합니다.
         """
         match_score_terms = []
 
@@ -522,6 +539,52 @@ class MovieRepository:
 
         prioritized_query = query.order_by(match_score.desc())
         return self._apply_sort(prioritized_query, sort_by, sort_order)
+
+    def _apply_genre_recommendation_sort(self, query: Select) -> Select:
+        """장르-only + 관련도순에서는 추천 점수 기반 정렬을 적용합니다."""
+        recommendation_score = self._build_genre_recommendation_score()
+        return query.order_by(
+            recommendation_score.desc(),
+            *self._nulls_last_order(Movie.rating, descending=True),
+            *self._nulls_last_order(Movie.vote_count, descending=True),
+            *self._nulls_last_order(Movie.popularity_score, descending=True),
+            *self._nulls_last_order(Movie.release_year, descending=True),
+        )
+
+    def _build_genre_recommendation_score(self):
+        params = build_genre_discovery_recommendation_params(current_year=date.today().year)
+        prior_rating = params["prior_rating_norm"]
+        prior_vote_count = params["prior_vote_count"]
+        popularity_scale = params["popularity_scale"]
+        freshness_window_years = params["freshness_window_years"]
+        rating_weight = params["rating_weight"]
+        popularity_weight = params["popularity_weight"]
+        freshness_weight = params["freshness_weight"]
+        current_year = int(params["current_year"])
+
+        vote_count = func.coalesce(Movie.vote_count, 0.0)
+        rating_norm = func.coalesce(Movie.rating, 0.0) / 10.0
+        bayesian_rating = (
+            (rating_norm * vote_count) + (prior_rating * prior_vote_count)
+        ) / (vote_count + prior_vote_count)
+
+        popularity = func.coalesce(Movie.popularity_score, 0.0)
+        popularity_norm = popularity / (popularity + popularity_scale)
+
+        freshness = case(
+            (Movie.release_year.is_(None), 0.0),
+            (Movie.release_year >= current_year, 1.0),
+            ((current_year - Movie.release_year) >= freshness_window_years, 0.0),
+            else_=(
+                freshness_window_years - (current_year - Movie.release_year)
+            ) / freshness_window_years,
+        )
+
+        return (
+            (bayesian_rating * rating_weight)
+            + (popularity_norm * popularity_weight)
+            + (freshness * freshness_weight)
+        )
 
     def _json_text_like(self, column, pattern: str):
         """JSON/배열 컬럼을 문자열로 캐스팅해 LIKE 검색 조건을 생성합니다."""

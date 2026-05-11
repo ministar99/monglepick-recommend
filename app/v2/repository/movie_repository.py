@@ -14,11 +14,13 @@ MovieDTO로 변환합니다.
 
 import json
 import logging
+from datetime import date
 from typing import Optional
 
 import aiomysql
 from pydantic import ValidationError
 
+from app.genre_discovery_recommendation import build_genre_discovery_recommendation_params
 from app.v2.model.dto import MovieDTO
 from app.repository.movie_repository import (
     EXCLUDED_SEARCH_CERTIFICATIONS,
@@ -131,7 +133,18 @@ class MovieRepository:
             conditions.append("JSON_CONTAINS(genres, JSON_QUOTE(%s))")
             params.append(genre)
 
-        if genres:
+        if genre_match_groups:
+            for alias_group in genre_match_groups:
+                unique_aliases = [alias for alias in dict.fromkeys(alias_group) if alias]
+                if not unique_aliases:
+                    continue
+                genre_conditions = [
+                    "JSON_CONTAINS(genres, JSON_QUOTE(%s))"
+                    for _ in unique_aliases
+                ]
+                conditions.append(f"({' OR '.join(genre_conditions)})")
+                params.extend(unique_aliases)
+        elif genres:
             unique_genres = list(dict.fromkeys(genres))
             genre_conditions = ["JSON_CONTAINS(genres, JSON_QUOTE(%s))" for _ in unique_genres]
             conditions.append(f"({' OR '.join(genre_conditions)})")
@@ -173,8 +186,9 @@ class MovieRepository:
         direction = "ASC" if sort_order == "asc" else "DESC"
         sort_parts: list[str] = []
         sort_params: list = []
+        is_genre_recommendation_sort = bool(genre_match_groups) and sort_by == "relevance"
 
-        if genre_match_groups:
+        if genre_match_groups and not is_genre_recommendation_sort:
             for alias_group in genre_match_groups:
                 unique_aliases = [alias for alias in dict.fromkeys(alias_group) if alias]
                 if not unique_aliases:
@@ -183,7 +197,21 @@ class MovieRepository:
                 sort_parts.append(f"(CASE WHEN ({alias_sql}) THEN 1 ELSE 0 END) DESC")
                 sort_params.extend(unique_aliases)
 
-        if sort_by == "title":
+        if is_genre_recommendation_sort:
+            recommendation_sql, recommendation_params = self._build_genre_recommendation_order_sql()
+            sort_parts.extend([
+                f"{recommendation_sql} DESC",
+                "rating IS NULL ASC",
+                "rating DESC",
+                "vote_count IS NULL ASC",
+                "vote_count DESC",
+                "popularity_score IS NULL ASC",
+                "popularity_score DESC",
+                "release_year IS NULL ASC",
+                "release_year DESC",
+            ])
+            sort_params.extend(recommendation_params)
+        elif sort_by == "title":
             sort_parts.extend([
                 f"title IS NULL ASC",
                 f"title {direction}",
@@ -238,6 +266,38 @@ class MovieRepository:
         movies = [MovieDTO(**row) for row in rows]
 
         return movies, total
+
+    def _build_genre_recommendation_order_sql(self) -> tuple[str, list[object]]:
+        params = build_genre_discovery_recommendation_params(current_year=date.today().year)
+        sql = (
+            "("
+            "((((COALESCE(rating, 0) / 10.0) * COALESCE(vote_count, 0)) + (%s * %s)) "
+            "/ (COALESCE(vote_count, 0) + %s)) * %s "
+            "+ ((COALESCE(popularity_score, 0) / (COALESCE(popularity_score, 0) + %s)) * %s) "
+            "+ ((CASE "
+            "WHEN release_year IS NULL THEN 0.0 "
+            "WHEN release_year >= %s THEN 1.0 "
+            "WHEN %s - release_year >= %s THEN 0.0 "
+            "ELSE (%s - (%s - release_year)) / %s "
+            "END) * %s)"
+            ")"
+        )
+        sql_params: list[object] = [
+            params["prior_rating_norm"],
+            params["prior_vote_count"],
+            params["prior_vote_count"],
+            params["rating_weight"],
+            params["popularity_scale"],
+            params["popularity_weight"],
+            int(params["current_year"]),
+            int(params["current_year"]),
+            params["freshness_window_years"],
+            params["freshness_window_years"],
+            int(params["current_year"]),
+            params["freshness_window_years"],
+            params["freshness_weight"],
+        ]
+        return sql, sql_params
 
     async def find_by_id(self, movie_id: str) -> MovieDTO | None:
         """
@@ -525,7 +585,8 @@ class MovieRepository:
     async def find_popular_by_genre_combination(
         self,
         *,
-        genres: list[str],
+        genres: list[str] | None = None,
+        genre_alias_groups: list[list[str]] | None = None,
         exclude_movie_ids: list[str] | None = None,
         vote_count_min: int = 100,
         limit: int = 20,
@@ -536,13 +597,27 @@ class MovieRepository:
         선호 장르 교집합 섹션 전용 쿼리입니다. 장르 조합을 점차 완화하며 여러 번 호출될 수 있으므로,
         WHERE 절은 장르 교집합과 추천 제외 목록에만 집중하고 정렬은 popularity_score 우선으로 둡니다.
         """
-        normalized_genres = [
-            str(genre).strip()
-            for genre in genres
-            if isinstance(genre, str) and str(genre).strip()
-        ]
-        unique_genres = list(dict.fromkeys(normalized_genres))
-        if not unique_genres:
+        normalized_alias_groups: list[list[str]] = []
+        if genre_alias_groups:
+            for alias_group in genre_alias_groups:
+                unique_aliases = [
+                    str(alias).strip()
+                    for alias in alias_group
+                    if isinstance(alias, str) and str(alias).strip()
+                ]
+                unique_aliases = list(dict.fromkeys(unique_aliases))
+                if unique_aliases:
+                    normalized_alias_groups.append(unique_aliases)
+        elif genres:
+            unique_genres = [
+                str(genre).strip()
+                for genre in genres
+                if isinstance(genre, str) and str(genre).strip()
+            ]
+            unique_genres = list(dict.fromkeys(unique_genres))
+            normalized_alias_groups = [[genre] for genre in unique_genres]
+
+        if not normalized_alias_groups:
             return []
 
         normalized_exclude_ids = [
@@ -562,9 +637,13 @@ class MovieRepository:
             f'%"{EXCLUDED_SEARCH_GENRES[0]}"%',
         ]
 
-        for genre in unique_genres:
-            conditions.append("JSON_CONTAINS(genres, JSON_QUOTE(%s))")
-            params.append(genre)
+        for alias_group in normalized_alias_groups:
+            alias_conditions = [
+                "JSON_CONTAINS(genres, JSON_QUOTE(%s))"
+                for _ in alias_group
+            ]
+            conditions.append(f"({' OR '.join(alias_conditions)})")
+            params.extend(alias_group)
 
         if vote_count_min > 0:
             conditions.append("vote_count >= %s")

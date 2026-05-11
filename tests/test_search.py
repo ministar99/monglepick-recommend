@@ -174,11 +174,26 @@ async def test_search_movies_by_selected_genres_without_keyword(
     client: AsyncClient,
     async_session: AsyncSession,
 ):
-    """장르 탐색 검색 + 평점순 정렬은 평점 참여 인원 수 100명 이상 영화만 평점순으로 반환합니다."""
+    """장르 탐색 검색은 선택한 장르를 모두 포함한 영화만 반환합니다."""
     # PR #29 이후 vote_count 필터는 `sort_by == "rating"` 인 경우에만 적용된다.
     # 기본(관련도순)에서는 vote_count 미달 영화도 포함되므로 테스트 의도(평점순 +
     # vote_count 필터)를 유지하려면 명시적으로 sort_by=rating 을 전달해야 한다.
     await _insert_test_movies(async_session)
+    async_session.add(
+        Movie(
+            movie_id="350",
+            title="장르 교집합 영화",
+            title_en="Genre Intersection Movie",
+            overview="액션과 드라마를 모두 포함하는 테스트 영화",
+            genres=["액션", "드라마"],
+            release_year=2020,
+            rating=8.2,
+            vote_count=180,
+            poster_path="/genre-intersection.jpg",
+            director="테스트 감독 교집합",
+        )
+    )
+    await async_session.flush()
 
     response = await client.get(
         "/api/v1/search/movies",
@@ -189,12 +204,13 @@ async def test_search_movies_by_selected_genres_without_keyword(
     data = response.json()
     titles = [movie["title"] for movie in data["movies"]]
 
-    assert "인터스텔라" in titles
-    assert "기생충" in titles
+    assert titles == ["장르 교집합 영화"]
+    assert "인터스텔라" not in titles
+    assert "기생충" not in titles
     assert "어벤져스: 엔드게임" not in titles
-    assert data["pagination"]["total"] == 2
-    assert [movie["vote_count"] for movie in data["movies"]] == [150, 120]
-    assert [movie["rating"] for movie in data["movies"]] == [8.6, 8.5]
+    assert data["pagination"]["total"] == 1
+    assert [movie["vote_count"] for movie in data["movies"]] == [180]
+    assert [movie["rating"] for movie in data["movies"]] == [8.2]
 
     history_result = await async_session.execute(
         select(SearchHistory).where(SearchHistory.keyword == "액션,드라마")
@@ -204,6 +220,41 @@ async def test_search_movies_by_selected_genres_without_keyword(
     assert len(history_records) == 1
     assert history_records[0].filters["search_mode"] == "genre_discovery"
     assert history_records[0].filters["genres"] == ["액션", "드라마"]
+
+
+@pytest.mark.asyncio
+async def test_search_movies_by_selected_genres_matches_science_fiction_alias(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """`SF` 선택은 Science Fiction 계열 alias도 함께 매칭합니다."""
+    await _insert_test_movies(async_session)
+    async_session.add(
+        Movie(
+            movie_id="360",
+            title="사이파이 별칭 영화",
+            title_en="Science Fiction Alias Movie",
+            overview="Science Fiction 장르 alias 매칭 테스트",
+            genres=["Science Fiction", "드라마"],
+            release_year=2023,
+            rating=8.8,
+            vote_count=220,
+            poster_path="/science-fiction-alias.jpg",
+            director="테스트 감독 SF",
+        )
+    )
+    await async_session.flush()
+
+    response = await client.get(
+        "/api/v1/search/movies",
+        params={"genres": "SF", "sort_by": "rating", "size": 10},
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    titles = [movie["title"] for movie in data["movies"]]
+
+    assert "사이파이 별칭 영화" in titles
 
 
 @pytest.mark.asyncio
@@ -240,6 +291,75 @@ async def test_search_movies_by_selected_genres_relevance_does_not_require_vote_
     titles = [movie["title"] for movie in data["movies"]]
 
     assert "저투표 장르 매치" in titles
+    assert "인터스텔라" not in titles
+    assert "기생충" not in titles
+
+
+@pytest.mark.asyncio
+async def test_search_movies_by_selected_genres_relevance_uses_recommendation_order(
+    client: AsyncClient,
+    async_session: AsyncSession,
+):
+    """장르 탐색 관련도순은 고평점 저투표보다 검증된 인기작을 더 앞세웁니다."""
+    await _insert_test_movies(async_session)
+
+    async_session.add_all([
+        Movie(
+            movie_id="451",
+            title="신작 고평점 저투표",
+            title_en="Fresh High Rating Low Vote",
+            overview="평점은 높지만 아직 표본이 적은 영화",
+            genres=["액션", "드라마"],
+            release_year=2025,
+            rating=9.6,
+            vote_count=5,
+            popularity_score=5.0,
+            poster_path="/fresh-high-rating-low-vote.jpg",
+            director="테스트 감독 G1",
+        ),
+        Movie(
+            movie_id="452",
+            title="검증된 인기작",
+            title_en="Proven Crowd Pleaser",
+            overview="평점과 투표 수, 인기도가 모두 안정적인 영화",
+            genres=["액션", "드라마"],
+            release_year=2024,
+            rating=8.4,
+            vote_count=1600,
+            popularity_score=85.0,
+            poster_path="/proven-crowd-pleaser.jpg",
+            director="테스트 감독 G2",
+        ),
+        Movie(
+            movie_id="453",
+            title="오래된 평점작",
+            title_en="Older High Rated Title",
+            overview="평점은 좋지만 오래된 작품",
+            genres=["액션", "드라마"],
+            release_year=1998,
+            rating=8.8,
+            vote_count=220,
+            popularity_score=15.0,
+            poster_path="/older-high-rated-title.jpg",
+            director="테스트 감독 G3",
+        ),
+    ])
+    await async_session.flush()
+
+    response = await client.get(
+        "/api/v1/search/movies",
+        params={"genres": "액션,드라마", "sort_by": "relevance", "size": 10},
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    titles = [movie["title"] for movie in data["movies"]]
+
+    assert titles[:3] == [
+        "검증된 인기작",
+        "신작 고평점 저투표",
+        "오래된 평점작",
+    ]
 
 
 @pytest.mark.asyncio
@@ -295,14 +415,14 @@ async def test_search_movies_by_selected_genres_release_date_does_not_require_vo
 
 
 @pytest.mark.asyncio
-async def test_search_movies_by_selected_genres_prioritizes_match_count(
+async def test_search_movies_by_selected_genres_requires_all_selected_genres(
     client: AsyncClient,
     async_session: AsyncSession,
 ):
-    """장르 탐색 검색은 선택 장르를 더 많이 만족한 영화가 먼저 노출됩니다."""
+    """장르 탐색 검색은 일부만 겹치는 영화가 아니라 전체 장르 교집합만 남깁니다."""
     await _insert_test_movies(async_session)
 
-    prioritized_movies = [
+    candidate_movies = [
         Movie(
             movie_id="500",
             title="장르 풀매치",
@@ -319,7 +439,7 @@ async def test_search_movies_by_selected_genres_prioritizes_match_count(
             movie_id="600",
             title="장르 투매치",
             title_en="Genre Two Match",
-            overview="선택 장르 중 두 개를 만족하는 영화",
+            overview="선택 장르 중 두 개만 만족하는 영화",
             genres=["액션", "드라마"],
             release_year=2023,
             rating=9.9,
@@ -340,7 +460,7 @@ async def test_search_movies_by_selected_genres_prioritizes_match_count(
             director="테스트 감독 C",
         ),
     ]
-    for movie in prioritized_movies:
+    for movie in candidate_movies:
         async_session.add(movie)
     await async_session.flush()
 
@@ -353,14 +473,7 @@ async def test_search_movies_by_selected_genres_prioritizes_match_count(
     data = response.json()
     titles = [movie["title"] for movie in data["movies"]]
 
-    # 선택 장르 3개 일치 > 2개 일치 > 1개 일치 순으로 우선 노출되어야 합니다.
-    assert titles[:5] == [
-        "장르 풀매치",
-        "장르 투매치",
-        "장르 원매치",
-        "인터스텔라",
-        "기생충",
-    ]
+    assert titles == ["장르 풀매치"]
 
 
 @pytest.mark.asyncio
@@ -405,11 +518,59 @@ async def test_search_service_uses_elasticsearch_for_genre_discovery(async_sessi
 
 
 @pytest.mark.asyncio
+async def test_search_service_passes_science_fiction_alias_group_to_elasticsearch(
+    async_session: AsyncSession,
+):
+    """`SF` 장르 탐색은 ES에도 Science Fiction alias 그룹을 함께 전달합니다."""
+    await _insert_test_movies(async_session)
+    service = SearchService(async_session)
+    service._search_es.search_movies = AsyncMock(return_value=ESSearchMoviesResult(
+        movies=[],
+        total=0,
+        did_you_mean=None,
+        related_queries=[],
+    ))
+
+    await service.search_movies(
+        genres=["SF"],
+        sort_by="relevance",
+        sort_order="desc",
+    )
+
+    kwargs = service._search_es.search_movies.await_args.kwargs
+    assert kwargs["genres"] == ["SF"]
+    assert kwargs["genre_match_groups"] == [[
+        "SF",
+        "Sci-Fi",
+        "Sci Fi",
+        "SciFi",
+        "Science Fiction",
+        "Science-Fiction",
+        "공상과학",
+    ]]
+
+
+@pytest.mark.asyncio
 async def test_search_service_falls_back_to_mysql_when_genre_discovery_es_returns_none(
     async_session: AsyncSession,
 ):
     """장르 탐색 ES가 비어 있으면 기존 MySQL 검색으로 폴백합니다."""
     await _insert_test_movies(async_session)
+    async_session.add(
+        Movie(
+            movie_id="351",
+            title="MYSQL 교집합 결과",
+            title_en="MySQL Intersection Result",
+            overview="MySQL 폴백 장르 교집합 테스트",
+            genres=["액션", "드라마"],
+            release_year=2021,
+            rating=8.1,
+            vote_count=110,
+            poster_path="/mysql-intersection.jpg",
+            director="테스트 감독 폴백",
+        )
+    )
+    await async_session.flush()
     service = SearchService(async_session)
     service._search_es.search_movies = AsyncMock(return_value=None)
 
@@ -420,12 +581,48 @@ async def test_search_service_falls_back_to_mysql_when_genre_discovery_es_return
     )
 
     assert result.search_source == "mysql"
-    assert result.pagination.total == 3
-    assert {movie.title for movie in result.movies} == {
-        "인터스텔라",
-        "기생충",
-        "어벤져스: 엔드게임",
-    }
+    assert result.pagination.total == 1
+    assert [movie.title for movie in result.movies] == ["MYSQL 교집합 결과"]
+
+
+@pytest.mark.asyncio
+async def test_search_service_falls_back_to_mysql_when_genre_discovery_es_returns_zero_results(
+    async_session: AsyncSession,
+):
+    """장르 탐색 ES가 0건을 반환해도 MySQL에 결과가 있으면 폴백합니다."""
+    await _insert_test_movies(async_session)
+    async_session.add(
+        Movie(
+            movie_id="361",
+            title="ES 빈결과 폴백 SF 영화",
+            title_en="ES Empty Fallback SF Movie",
+            overview="ES 0건 응답 시 MySQL 폴백 테스트",
+            genres=["Science Fiction", "드라마"],
+            release_year=2022,
+            rating=8.3,
+            vote_count=170,
+            poster_path="/es-empty-fallback-sf.jpg",
+            director="테스트 감독 ES 폴백",
+        )
+    )
+    await async_session.flush()
+    service = SearchService(async_session)
+    service._search_es.search_movies = AsyncMock(return_value=ESSearchMoviesResult(
+        movies=[],
+        total=0,
+        did_you_mean=None,
+        related_queries=[],
+    ))
+
+    result = await service.search_movies(
+        genres=["SF"],
+        sort_by="relevance",
+        sort_order="desc",
+        size=10,
+    )
+
+    assert result.search_source == "mysql"
+    assert "ES 빈결과 폴백 SF 영화" in [movie.title for movie in result.movies]
 
 
 @pytest.mark.asyncio

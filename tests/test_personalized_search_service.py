@@ -209,13 +209,23 @@ class StubMovieRepository:
     async def find_popular_by_genre_combination(
         self,
         *,
-        genres: list[str],
+        genres: list[str] | None = None,
+        genre_alias_groups: list[list[str]] | None = None,
         exclude_movie_ids: list[str] | None = None,
         vote_count_min: int = 100,
         limit: int = 20,
     ) -> list[MovieDTO]:
         excluded = set(exclude_movie_ids or [])
-        movies = list(self._genre_combo_results.get(tuple(genres), []))
+        group_key = tuple(
+            tuple(alias for alias in alias_group if alias)
+            for alias_group in (genre_alias_groups or [])
+            if alias_group
+        )
+        legacy_key = tuple(genres or [])
+        movies = list(
+            self._genre_combo_results.get(group_key)
+            or self._genre_combo_results.get(legacy_key, [])
+        )
         filtered = [
             movie
             for movie in movies
@@ -511,6 +521,62 @@ async def test_personalized_top_picks_falls_back_to_box_office_when_user_signal_
 
 
 @pytest.mark.asyncio
+async def test_personalized_top_picks_excludes_low_vote_and_non_korean_titles():
+    perfect_but_unverified = _movie(
+        "pick-low-vote",
+        title="신의 별점",
+        genres=["드라마"],
+        rating=10.0,
+        vote_count=3,
+        release_year=2026,
+    )
+    english_title_pick = _movie(
+        "pick-english",
+        title="Sherlock Holmes",
+        genres=["드라마"],
+        rating=8.9,
+        vote_count=1800,
+        release_year=2009,
+    )
+    valid_korean_pick = _movie(
+        "pick-korean",
+        title="기생충",
+        genres=["드라마", "스릴러"],
+        rating=8.6,
+        vote_count=3900,
+        release_year=2019,
+    )
+
+    service = PersonalizedSearchService(conn=None)
+    service._favorite_genre_repo = StubFavoriteGenreRepository(
+        [{"genre_name": "드라마"}]
+    )
+    service._favorite_movie_repo = StubFavoriteMovieRepository([])
+    service._user_preference_repo = StubUserPreferenceRepository()
+    service._wishlist_repo = StubWishlistRepository([])
+    service._review_repo = StubReviewRepository([])
+    service._personalized_repo = StubPersonalizedRepository()
+    service._movie_repo = StubMovieRepository(
+        movies_by_id={},
+        search_results={
+            ("genres", "드라마"): [
+                perfect_but_unverified,
+                english_title_pick,
+                valid_korean_pick,
+            ],
+        },
+    )
+    service._match_cowatch_service = StubMatchCowatchService()
+    service._search_service = StubSearchService([])
+    service._search_es = StubSearchEs(available=False)
+
+    result = await service.get_top_picks(user_id="user-top-pick-filter", limit=3)
+
+    assert [movie.movie_id for movie in result.movies] == ["pick-korean"]
+    assert result.total_candidates == 1
+
+
+@pytest.mark.asyncio
 async def test_personalized_top_picks_uses_es_candidates_when_available():
     favorite_movie = _movie(
         "fav-es-1",
@@ -746,6 +812,43 @@ async def test_personalized_top_picks_builds_genre_intersection_sections_with_re
         movie.movie_id != "genre-excluded-1"
         for movie in result.genre_sections[0].movies
     )
+
+
+@pytest.mark.asyncio
+async def test_personalized_top_picks_matches_similar_genre_labels_via_alias_group():
+    western_pick = _movie(
+        "western-pick-1",
+        title="황야의 무법자",
+        genres=["서부"],
+        rating=8.1,
+        vote_count=450,
+        release_year=1966,
+    )
+
+    service = PersonalizedSearchService(conn=None)
+    service._favorite_genre_repo = StubFavoriteGenreRepository(
+        [{"genre_name": "서부극"}]
+    )
+    service._favorite_movie_repo = StubFavoriteMovieRepository([])
+    service._user_preference_repo = StubUserPreferenceRepository()
+    service._wishlist_repo = StubWishlistRepository([])
+    service._review_repo = StubReviewRepository([])
+    service._personalized_repo = StubPersonalizedRepository()
+    service._movie_repo = StubMovieRepository(
+        movies_by_id={},
+        genre_combo_results={
+            (("서부", "서부극(웨스턴)"),): [western_pick],
+        },
+    )
+    service._match_cowatch_service = StubMatchCowatchService()
+    service._search_service = StubSearchService([])
+    service._search_es = StubSearchEs(available=False)
+
+    result = await service.get_top_picks(user_id="user-western", limit=5)
+
+    assert result.genre_sections
+    assert result.genre_sections[0].title == "#서부극 장르 픽!"
+    assert result.genre_sections[0].movies[0].movie_id == "western-pick-1"
 
 
 def test_personalized_genre_section_groups_split_five_genres_into_three_and_two():

@@ -34,11 +34,13 @@ class StubMovieRepository:
         self,
         *,
         title_candidates_by_key: dict[str, list[MovieDTO]] | None = None,
+        search_result: tuple[list[MovieDTO], int] | None = None,
     ):
         self._title_candidates_by_key = title_candidates_by_key or {}
+        self._search_result = search_result or ([], 0)
 
     async def search(self, **kwargs):
-        return [], 0
+        return self._search_result
 
     async def find_with_posters_by_titles(
         self,
@@ -53,13 +55,14 @@ class StubMovieRepository:
 
 
 class StubSearchEs:
-    def __init__(self, movies: list[ESSearchMovieItem]):
+    def __init__(self, movies: list[ESSearchMovieItem], total: int | None = None):
         self._movies = movies
+        self._total = len(movies) if total is None else total
 
     async def search_movies(self, **kwargs):
         return ESSearchMoviesResult(
             movies=self._movies,
-            total=len(self._movies),
+            total=self._total,
             did_you_mean=None,
             related_queries=[],
         )
@@ -103,3 +106,32 @@ async def test_search_movies_replaces_external_poster_results_with_exact_title_m
 
     assert [movie.movie_id for movie in result.movies] == ["db-1"]
     assert result.movies[0].poster_url == f"{service._settings.TMDB_IMAGE_BASE_URL}/oldboy.jpg"
+
+
+@pytest.mark.asyncio
+async def test_search_movies_v2_falls_back_to_mysql_when_genre_discovery_es_returns_zero_results():
+    service = SearchService(conn=None)
+    fallback_movie = MovieDTO(
+        movie_id="db-sf-1",
+        title="V2 SF 폴백 영화",
+        title_en="V2 SF Fallback Movie",
+        genres=["Science Fiction", "드라마"],
+        release_year=2024,
+        rating=8.4,
+        vote_count=210,
+        poster_path="/v2-sf-fallback.jpg",
+        overview="ES 0건 장르 탐색 폴백 테스트",
+    )
+    service._search_es = StubSearchEs([], total=0)
+    service._movie_repo = StubMovieRepository(search_result=([fallback_movie], 1))
+
+    result = await service.search_movies(
+        genres=["SF"],
+        sort_by="relevance",
+        sort_order="desc",
+        page=1,
+        size=20,
+    )
+
+    assert result.search_source == "mysql"
+    assert [movie.movie_id for movie in result.movies] == ["db-sf-1"]
